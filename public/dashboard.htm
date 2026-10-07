@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dashboard | ExamMock AI</title><link rel="stylesheet" href="css/app.css">
+<style>
+.dashHero{display:flex;justify-content:space-between;gap:20px;align-items:center;background:linear-gradient(135deg,#0f2744,#1d4f86);color:#fff;border-radius:22px;padding:28px;margin-top:20px}
+.dashHero .muted{color:#d8e6f5}.dashHero h2{margin:5px 0}.dashGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:18px}
+.dashStat{background:#fff;border:1px solid #e2e8f0;border-radius:15px;padding:16px}.dashStat span{display:block;color:#64748b;font-size:12px}.dashStat b{display:block;font-size:24px;margin-top:5px}
+.dashColumns{display:grid;grid-template-columns:1.15fr .85fr;gap:18px}.quickActions{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.quickCard{display:block;border:1px solid #e2e8f0;border-radius:14px;padding:16px;text-decoration:none;color:inherit}.quickCard:hover{border-color:#94a3b8;background:#f8fafc}.recentRow{display:flex;justify-content:space-between;gap:16px;padding:13px 0;border-bottom:1px solid #e2e8f0}.weakRow{padding:11px 0;border-bottom:1px solid #e2e8f0}.weakRowHead{display:flex;justify-content:space-between;gap:10px}.miniBar{height:7px;background:#e2e8f0;border-radius:99px;overflow:hidden;margin-top:7px}.miniBar i{display:block;height:100%;background:#0f2744;border-radius:99px}
+@media(max-width:900px){.dashGrid{grid-template-columns:repeat(2,1fr)}.dashColumns{grid-template-columns:1fr}.quickActions{grid-template-columns:1fr}}
+@media(max-width:520px){.dashGrid{grid-template-columns:1fr}.dashHero{align-items:flex-start;flex-direction:column}.recentRow{flex-direction:column}}
+</style>
+</head>
+<body><div id="appNav"></div><main class="container">
+<div class="pagehead"><span class="eyebrow">DASHBOARD</span><h1 id="hello">Your preparation dashboard</h1><p class="muted">Your mock-test progress and next preparation actions in one place.</p></div>
+<section class="dashHero"><div><span class="eyebrow">EXAMMOCK AI</span><h2 id="heroText">Ready for your next mock?</h2><p class="muted">Start a fresh unseen paper from the ready pool.</p></div><a class="btn primary" href="mocks.htm">Start New Mock</a></section>
+<div class="dashGrid">
+<div class="dashStat"><span>Mocks Completed</span><b id="tests">0</b></div>
+<div class="dashStat"><span>Average Accuracy</span><b id="acc">0%</b></div>
+<div class="dashStat"><span>Best Score</span><b id="best">0%</b></div>
+<div class="dashStat"><span>Aggregate Score</span><b id="score">0 / 0</b></div>
+</div>
+<section class="section"><div class="quickActions">
+<a class="quickCard" href="mocks.htm"><b>Start New Mock</b><p class="muted">Choose exam, stage, test type and language.</p></a>
+<a class="quickCard" href="my-tests.htm"><b>My Tests</b><p class="muted">Review old attempts or retry the exact same paper.</p></a>
+<a class="quickCard" href="performance.htm"><b>Performance</b><p class="muted">See weak topics, strong topics and section analysis.</p></a>
+</div></section>
+<section class="section"><div class="dashColumns">
+<div class="panel"><h2>Recent Performance</h2><div id="recent"></div></div>
+<div class="panel"><h2>Topics to Improve</h2><p class="muted">Based on your attempted-question error rate.</p><div id="weak"></div><div class="actions"><a class="btn" href="performance.htm">Full Analysis</a></div></div>
+</div></section>
+</main><script src="js/common.js"></script><script src="js/dashboard.js"></script></body></html>

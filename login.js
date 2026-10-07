@@ -1,0 +1,12 @@
+const $=id=>document.getElementById(id);
+function msg(el,t,type="error"){el.textContent=t;el.className=`auth-message show ${type}`;} function clear(el){el.textContent="";el.className="auth-message";}
+function load(b,on,a,z){b.disabled=on;b.textContent=on?z:a;} function save(d){localStorage.setItem("examMockToken",d.token);localStorage.setItem("examMockUser",JSON.stringify(d.user));}
+async function api(url,body){const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});let d;try{d=await r.json()}catch{throw new Error("Server returned an invalid response.")}if(!r.ok||!d.ok)throw new Error(d.error||"Something went wrong.");return d;}
+function showLoginForm(){$("loginTab").classList.add("active");$("registerTab").classList.remove("active");$("loginForm").classList.add("active");$("registerForm").classList.remove("active");}
+function showRegisterForm(){$("registerTab").classList.add("active");$("loginTab").classList.remove("active");$("registerForm").classList.add("active");$("loginForm").classList.remove("active");}
+$("loginTab").onclick=showLoginForm;$("registerTab").onclick=showRegisterForm;
+$("loginForm").onsubmit=async e=>{e.preventDefault();const b=$("loginButton"),m=$("loginMessage");clear(m);try{load(b,1,"Login","Logging in...");const d=await api("/api/auth/login",{email:$("loginEmail").value.trim(),password:$("loginPassword").value});save(d);location.href="index.htm";}catch(x){msg(m,x.message)}finally{load(b,0,"Login","Logging in...")}};
+$("registerForm").onsubmit=async e=>{e.preventDefault();const b=$("registerButton"),m=$("registerMessage");clear(m);try{load(b,1,"Create Account","Creating Account...");const d=await api("/api/auth/register",{name:$("registerName").value.trim(),email:$("registerEmail").value.trim(),password:$("registerPassword").value,confirmPassword:$("registerConfirmPassword").value});save(d);location.href="index.htm";}catch(x){msg(m,x.message)}finally{load(b,0,"Create Account","Creating Account...")}};
+$("showAdminButton").onclick=()=>$("adminForm").classList.toggle("show");
+$("adminForm").onsubmit=async e=>{e.preventDefault();const b=$("adminLoginButton"),m=$("adminMessage");clear(m);try{load(b,1,"Login as Admin","Logging in...");const d=await api("/api/auth/admin-login",{identifier:$("adminIdentifier").value.trim(),password:$("adminPassword").value});save(d);location.href="admin.htm";}catch(x){msg(m,x.message)}finally{load(b,0,"Login as Admin","Logging in...")}};
+if(location.hash==="#register")showRegisterForm();

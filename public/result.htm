@@ -1,0 +1,24 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Result | ExamMock AI</title><link rel="stylesheet" href="css/app.css">
+<style>
+.resultHero{background:linear-gradient(135deg,#0f2744,#1d4f86);color:#fff;border-radius:22px;padding:28px;margin-top:20px}
+.resultHero .muted{color:#d8e6f5}.scoreBig{font-size:38px;font-weight:900;margin-top:8px}
+.resultGrid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:18px}
+.rstat{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:16px}.rstat span{display:block;color:#64748b;font-size:13px}.rstat b{display:block;font-size:24px;margin-top:5px}
+.sectionTable{width:100%;border-collapse:collapse}.sectionTable th,.sectionTable td{padding:12px;border-bottom:1px solid #e2e8f0;text-align:left}.sectionTable th{color:#64748b;font-size:12px}
+@media(max-width:850px){.resultGrid{grid-template-columns:repeat(2,1fr)}}@media(max-width:520px){.resultGrid{grid-template-columns:1fr}}
+</style></head>
+<body><div id="appNav"></div><main class="container">
+<div class="pagehead"><span class="eyebrow">TEST COMPLETED</span><h1 id="title">Mock Test Result</h1><p id="meta" class="muted"></p></div>
+<section class="resultHero"><div>Final Score</div><div id="score" class="scoreBig">0 / 0</div><div id="scorePercent" class="muted"></div></section>
+<div class="resultGrid">
+<div class="rstat"><span>Correct</span><b id="correct">0</b></div>
+<div class="rstat"><span>Wrong</span><b id="wrong">0</b></div>
+<div class="rstat"><span>Unattempted</span><b id="unattempted">0</b></div>
+<div class="rstat"><span>Accuracy</span><b id="accuracy">0%</b></div>
+<div class="rstat"><span>Time Taken</span><b id="time">00:00</b></div>
+</div>
+<section class="section"><div class="panel"><h2>Section Analysis</h2><div style="overflow:auto"><table class="sectionTable"><thead><tr><th>Section</th><th>Total</th><th>Correct</th><th>Wrong</th><th>Unattempted</th><th>Accuracy</th><th>Score</th></tr></thead><tbody id="sectionRows"></tbody></table></div>
+<div class="actions"><button class="btn primary" onclick="solutions()">View Detailed Solutions</button><a class="btn" href="mocks.htm">Take Another Mock</a><a class="btn" href="my-tests.htm">My Tests</a></div></div></section>
+</main><script src="js/common.js"></script><script src="js/result.js"></script></body></html>

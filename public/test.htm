@@ -1,0 +1,76 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CBT | ExamMock AI</title>
+  <link rel="stylesheet" href="css/app.css">
+  <link rel="stylesheet" href="css/test.css">
+</head>
+<body>
+  <header class="cbtTop">
+    <div class="cbtBrand">ExamMock AI</div>
+    <div class="examInfo">
+      <b id="examTitle"></b>
+      <div id="meta" class="cbtMeta"></div>
+    </div>
+    <div id="timer" class="timer">00:00</div>
+  </header>
+
+  <div id="sectionBar" class="sectionbar"></div>
+
+  <main class="cbt">
+    <section class="qarea">
+      <div class="qhead">
+        <b id="qno"></b>
+        <span id="marks" class="muted"></span>
+      </div>
+
+      <div id="direction" class="direction muted"></div>
+      <div id="question" class="qtext"></div>
+      <div id="options"></div>
+
+      <div class="controls">
+        <button class="btn" id="prevBtn" onclick="prev()">Previous</button>
+        <button class="btn" onclick="clearAns()">Clear Response</button>
+        <button class="btn reviewBtn" onclick="reviewNext()">Mark for Review & Next</button>
+        <button class="btn primary" onclick="saveNext()">Save & Next</button>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <h3>Question Palette</h3>
+
+      <div class="legend">
+        <span><i class="legendBox answered"></i> Answered</span>
+        <span><i class="legendBox notAnswered"></i> Not Answered</span>
+        <span><i class="legendBox review"></i> Marked for Review</span>
+        <span><i class="legendBox answeredReview"></i> Answered & Review</span>
+        <span><i class="legendBox notVisited"></i> Not Visited</span>
+      </div>
+
+      <div id="summaryCounts" class="summaryCounts"></div>
+      <div id="palette" class="palette"></div>
+
+      <button id="submitBtn" class="btn primary submitBtn" onclick="submitTest()">
+        Submit Test
+      </button>
+    </aside>
+  </main>
+
+  <div id="submitModal" class="modal hidden">
+    <div class="modalCard">
+      <h2>Submit Test?</h2>
+      <p class="muted">Please check your attempt summary before submitting.</p>
+      <div id="submitSummary" class="submitSummary"></div>
+      <div class="modalActions">
+        <button class="btn" onclick="closeSubmitModal()">Continue Test</button>
+        <button class="btn primary" onclick="confirmSubmit()">Submit Test</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/common.js"></script>
+  <script src="js/test.js"></script>
+</body>
+</html>

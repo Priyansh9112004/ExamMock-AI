@@ -1,0 +1,26 @@
+{
+  "questions": [
+    {
+      "id": "optional-uuid",
+      "examId": "ibps-clerk",
+      "stage": "Prelims",
+      "sectionId": "numerical",
+      "sectionName": "Numerical Ability",
+      "language": "ENGLISH",
+      "topic": "Percentage",
+      "subtopic": "Successive percentage change",
+      "difficulty": "MEDIUM",
+      "question": "REPLACE WITH VERIFIED QUESTION",
+      "options": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "answer": 0,
+      "solution": "REPLACE WITH VERIFIED STEP-BY-STEP SOLUTION",
+      "shortTrick": "OPTIONAL SHORT METHOD",
+      "source": "ExamMock Master Bank"
+    }
+  ]
+}

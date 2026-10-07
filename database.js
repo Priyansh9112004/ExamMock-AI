@@ -1,0 +1,244 @@
+const Database=require('better-sqlite3'); const path=require('path'); const crypto=require('crypto');
+const db=new Database(path.join(__dirname,'data','exammock.db')); db.pragma('journal_mode = WAL'); db.pragma('foreign_keys = ON');
+db.exec(`
+CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,name TEXT NOT NULL,user_id TEXT UNIQUE COLLATE NOCASE,email TEXT UNIQUE COLLATE NOCASE,password_hash TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS papers(id TEXT PRIMARY KEY,exam_id TEXT NOT NULL,exam_name TEXT NOT NULL,stage TEXT NOT NULL,test_type TEXT NOT NULL,section TEXT NOT NULL DEFAULT '',language TEXT NOT NULL,questions_json TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'READY',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_papers_pool ON papers(exam_id,stage,test_type,section,language,status);
+CREATE TABLE IF NOT EXISTS attempts(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT NOT NULL,paper_id TEXT NOT NULL,started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,submitted_at TEXT,score REAL,max_score REAL,correct_count INTEGER,wrong_count INTEGER,unattempted_count INTEGER,accuracy REAL,total_time_seconds INTEGER,answers_json TEXT,sections_json TEXT,FOREIGN KEY(user_id) REFERENCES users(id),FOREIGN KEY(paper_id) REFERENCES papers(id));
+CREATE INDEX IF NOT EXISTS idx_attempt_user ON attempts(user_id,id DESC);
+CREATE TABLE IF NOT EXISTS worker_state(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS generation_checkpoints(
+  pool_key TEXT PRIMARY KEY,
+  exam_id TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  test_type TEXT NOT NULL,
+  section TEXT NOT NULL DEFAULT '',
+  language TEXT NOT NULL,
+  questions_json TEXT NOT NULL DEFAULT '[]',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+`);
+db.exec(`
+CREATE TABLE IF NOT EXISTS question_bank(
+  id TEXT PRIMARY KEY,
+  exam_id TEXT NOT NULL DEFAULT '',
+  stage TEXT NOT NULL DEFAULT '',
+  section_id TEXT NOT NULL,
+  section_name TEXT NOT NULL,
+  language TEXT NOT NULL DEFAULT 'ENGLISH',
+  topic TEXT NOT NULL DEFAULT '',
+  subtopic TEXT NOT NULL DEFAULT '',
+  difficulty TEXT NOT NULL DEFAULT 'MEDIUM',
+  question TEXT NOT NULL,
+  options_json TEXT NOT NULL,
+  answer INTEGER NOT NULL,
+  solution TEXT NOT NULL DEFAULT '',
+  short_trick TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'MASTER_BANK',
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_question_bank_pick ON question_bank(section_id,language,active,difficulty,exam_id,stage);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_question_bank_unique ON question_bank(section_id,language,question);
+`);
+
+// v3 grouped-question migration: RC / DI / Puzzle / Seating / Cloze sets.
+const qbCols=db.prepare('PRAGMA table_info(question_bank)').all().map(x=>x.name);
+if(!qbCols.includes('group_id')) db.exec("ALTER TABLE question_bank ADD COLUMN group_id TEXT NOT NULL DEFAULT ''");
+if(!qbCols.includes('group_type')) db.exec("ALTER TABLE question_bank ADD COLUMN group_type TEXT NOT NULL DEFAULT ''");
+if(!qbCols.includes('shared_stem')) db.exec("ALTER TABLE question_bank ADD COLUMN shared_stem TEXT NOT NULL DEFAULT ''");
+if(!qbCols.includes('group_order')) db.exec("ALTER TABLE question_bank ADD COLUMN group_order INTEGER NOT NULL DEFAULT 0");
+db.exec("CREATE INDEX IF NOT EXISTS idx_question_bank_group ON question_bank(exam_id,stage,section_id,language,active,group_id,group_order)");
+
+// One-time migration from the earlier phone/OTP user table, if present.
+const userCols=db.prepare('PRAGMA table_info(users)').all().map(x=>x.name);
+if(!userCols.includes('user_id')||!userCols.includes('email')){
+ db.exec('PRAGMA foreign_keys = OFF');
+ db.exec(`ALTER TABLE users RENAME TO users_phone_backup; CREATE TABLE users(id TEXT PRIMARY KEY,name TEXT NOT NULL,user_id TEXT UNIQUE COLLATE NOCASE,email TEXT UNIQUE COLLATE NOCASE,password_hash TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);`);
+ db.exec('PRAGMA foreign_keys = ON');
+}
+// Repair legacy FK created when the old users table was renamed.
+// SQLite rewrites attempts.user_id FK to users_phone_backup during ALTER TABLE users RENAME.
+// The current auth system uses the new users table, so new attempts would otherwise fail.
+function repairAttemptsForeignKeys(){
+ const fks=db.prepare('PRAGMA foreign_key_list(attempts)').all();
+ const userFk=fks.find(x=>x.from==='user_id');
+ const paperFk=fks.find(x=>x.from==='paper_id');
+ if(userFk?.table==='users' && paperFk?.table==='papers')return;
+
+ db.pragma('foreign_keys = OFF');
+ try{
+  db.exec(`
+   DROP TABLE IF EXISTS attempts_fk_repair;
+   CREATE TABLE attempts_fk_repair(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    paper_id TEXT NOT NULL,
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    submitted_at TEXT,
+    score REAL,
+    max_score REAL,
+    correct_count INTEGER,
+    wrong_count INTEGER,
+    unattempted_count INTEGER,
+    accuracy REAL,
+    total_time_seconds INTEGER,
+    answers_json TEXT,
+    sections_json TEXT,
+    FOREIGN KEY(user_id) REFERENCES users(id),
+    FOREIGN KEY(paper_id) REFERENCES papers(id)
+   );
+   INSERT INTO attempts_fk_repair(id,user_id,paper_id,started_at,submitted_at,score,max_score,correct_count,wrong_count,unattempted_count,accuracy,total_time_seconds,answers_json,sections_json)
+   SELECT a.id,a.user_id,a.paper_id,a.started_at,a.submitted_at,a.score,a.max_score,a.correct_count,a.wrong_count,a.unattempted_count,a.accuracy,a.total_time_seconds,a.answers_json,a.sections_json
+   FROM attempts a
+   WHERE EXISTS(SELECT 1 FROM users u WHERE u.id=a.user_id)
+     AND EXISTS(SELECT 1 FROM papers p WHERE p.id=a.paper_id);
+   DROP TABLE attempts;
+   ALTER TABLE attempts_fk_repair RENAME TO attempts;
+   CREATE INDEX IF NOT EXISTS idx_attempt_user ON attempts(user_id,id DESC);
+  `);
+ } finally {
+  db.pragma('foreign_keys = ON');
+ }
+}
+repairAttemptsForeignKeys();
+
+const id=()=>crypto.randomUUID();
+function createUser({name,userId,email,passwordHash}){const userKey=id();db.prepare('INSERT INTO users(id,name,user_id,email,password_hash) VALUES(?,?,?,?,?)').run(userKey,name,userId,email,passwordHash);return getUserById(userKey)}
+function getUserByIdentifier(identifier){const v=String(identifier||'').trim();return db.prepare('SELECT * FROM users WHERE user_id=? COLLATE NOCASE OR email=? COLLATE NOCASE LIMIT 1').get(v,v.toLowerCase())}
+function getUserById(id){return db.prepare('SELECT id,name,user_id,email,created_at FROM users WHERE id=?').get(id)}
+function savePaper(p){db.prepare(`INSERT INTO papers(id,exam_id,exam_name,stage,test_type,section,language,questions_json,status) VALUES(?,?,?,?,?,?,?,?, 'READY')`).run(p.id,p.examId,p.examName,p.stage,p.testType,p.section||'',p.language,JSON.stringify(p.questions));return p.id}
+function readyCount(p){return db.prepare(`SELECT COUNT(*) c FROM papers WHERE exam_id=? AND stage=? AND test_type=? AND section=? AND language=? AND status='READY'`).get(p.examId,p.stage,p.testType,p.section||'',p.language).c}
+function allocatePaper(userId,p){return db.prepare(`SELECT p.* FROM papers p WHERE p.exam_id=? AND p.stage=? AND p.test_type=? AND p.section=? AND p.language=? AND p.status='READY' AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.user_id=? AND a.paper_id=p.id) ORDER BY p.created_at ASC LIMIT 1`).get(p.examId,p.stage,p.testType,p.section||'',p.language,userId)}
+function paperById(id){return db.prepare('SELECT * FROM papers WHERE id=?').get(id)}
+function startAttempt(userId,paperId){const info=db.prepare('INSERT INTO attempts(user_id,paper_id) VALUES(?,?)').run(userId,paperId);return Number(info.lastInsertRowid)}
+function submitAttempt(userId,attemptId,r){const a=db.prepare('SELECT * FROM attempts WHERE id=? AND user_id=?').get(attemptId,userId);if(!a)throw Error('Attempt not found');if(a.submitted_at)throw Error('Attempt already submitted');db.prepare(`UPDATE attempts SET submitted_at=CURRENT_TIMESTAMP,score=?,max_score=?,correct_count=?,wrong_count=?,unattempted_count=?,accuracy=?,total_time_seconds=?,answers_json=?,sections_json=? WHERE id=? AND user_id=?`).run(r.score,r.maxScore,r.correct,r.wrong,r.unattempted,r.accuracy,r.totalTimeSeconds,JSON.stringify(r.answers||[]),JSON.stringify(r.sections||[]),attemptId,userId);return attemptDetail(userId,attemptId)}
+function history(userId){return db.prepare(`SELECT a.id attemptId,a.started_at startedAt,a.submitted_at submittedAt,a.score,a.max_score maxScore,a.correct_count correct,a.wrong_count wrong,a.unattempted_count unattempted,a.accuracy,a.total_time_seconds totalTimeSeconds,p.id paperId,p.exam_id examId,p.exam_name examName,p.stage,p.test_type testType,p.section,p.language FROM attempts a JOIN papers p ON p.id=a.paper_id WHERE a.user_id=? ORDER BY a.id DESC`).all(userId)}
+function attemptDetail(userId,attemptId){const row=db.prepare(`SELECT a.*,p.exam_id,p.exam_name,p.stage,p.test_type,p.section,p.language,p.questions_json FROM attempts a JOIN papers p ON p.id=a.paper_id WHERE a.id=? AND a.user_id=?`).get(attemptId,userId);if(!row)return null;return {...row,questions:JSON.parse(row.questions_json),answers:row.answers_json?JSON.parse(row.answers_json):[],sections:row.sections_json?JSON.parse(row.sections_json):[]}}
+function stats(userId){
+ const rows=history(userId).filter(x=>x.submittedAt);
+ const tests=rows.length;
+ const totalScore=rows.reduce((s,x)=>s+Number(x.score||0),0);
+ const totalMax=rows.reduce((s,x)=>s+Number(x.maxScore||0),0);
+ const averageAccuracy=tests?rows.reduce((s,x)=>s+Number(x.accuracy||0),0)/tests:0;
+ const bestScorePercent=tests?Math.max(...rows.map(x=>Number(x.maxScore||0)?Number(x.score||0)/Number(x.maxScore)*100:0)):0;
+
+ let correct=0,wrong=0,unattempted=0,totalTimeSeconds=0;
+ const topicMap=new Map(),sectionMap=new Map();
+
+ const completed=db.prepare(`SELECT a.answers_json,a.sections_json,a.total_time_seconds
+  FROM attempts a WHERE a.user_id=? AND a.submitted_at IS NOT NULL ORDER BY a.id DESC`).all(userId);
+
+ for(const a of completed){
+  totalTimeSeconds+=Number(a.total_time_seconds||0);
+  let answers=[],sections=[];
+  try{answers=a.answers_json?JSON.parse(a.answers_json):[]}catch{}
+  try{sections=a.sections_json?JSON.parse(a.sections_json):[]}catch{}
+
+  for(const x of answers){
+   if(x.isAttempted){
+    if(x.isCorrect)correct++; else wrong++;
+   }else unattempted++;
+
+   const topic=String(x.topic||'').trim();
+   const subtopic=String(x.subtopic||'').trim();
+   if(topic){
+    const key=topic+'|||'+subtopic;
+    if(!topicMap.has(key))topicMap.set(key,{topic,subtopic,total:0,attempted:0,correct:0,wrong:0,unattempted:0});
+    const t=topicMap.get(key);t.total++;
+    if(x.isAttempted){t.attempted++;if(x.isCorrect)t.correct++;else t.wrong++;}else t.unattempted++;
+   }
+  }
+
+  for(const x of sections){
+   const name=String(x.section||'Questions');
+   if(!sectionMap.has(name))sectionMap.set(name,{section:name,total:0,correct:0,wrong:0,unattempted:0,score:0});
+   const s=sectionMap.get(name);
+   s.total+=Number(x.total||0);s.correct+=Number(x.correct||0);s.wrong+=Number(x.wrong||0);
+   s.unattempted+=Number(x.unattempted||0);s.score+=Number(x.score||0);
+  }
+ }
+
+ const topics=[...topicMap.values()].map(t=>({...t,accuracy:t.attempted?t.correct/t.attempted*100:0,errorRate:t.attempted?t.wrong/t.attempted*100:0}));
+ const weakTopics=topics.filter(t=>t.attempted>0).sort((a,b)=>b.errorRate-a.errorRate||b.wrong-a.wrong||b.attempted-a.attempted).slice(0,10);
+ const strongTopics=topics.filter(t=>t.attempted>0).sort((a,b)=>b.accuracy-a.accuracy||b.correct-a.correct).slice(0,5);
+ const sections=[...sectionMap.values()].map(s=>({...s,accuracy:(s.correct+s.wrong)?s.correct/(s.correct+s.wrong)*100:0}));
+
+ return{tests,totalScore,totalMax,averageAccuracy,bestScorePercent,correct,wrong,unattempted,totalTimeSeconds,
+  averageTimeSeconds:tests?totalTimeSeconds/tests:0,weakTopics,strongTopics,sections,recent:rows.slice(0,8)};
+}
+function getState(key){return db.prepare('SELECT value FROM worker_state WHERE key=?').get(key)?.value||null} function setState(key,value){db.prepare(`INSERT INTO worker_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`).run(key,String(value))}
+
+function checkpointKey(p){
+  return [p.examId,p.stage,p.testType,p.section||'',p.language].join('|||');
+}
+function getGenerationCheckpoint(p){
+  const row=db.prepare('SELECT questions_json FROM generation_checkpoints WHERE pool_key=?').get(checkpointKey(p));
+  if(!row)return [];
+  try{return JSON.parse(row.questions_json)||[]}catch{return []}
+}
+function saveGenerationCheckpoint(p,questions){
+  db.prepare(`INSERT INTO generation_checkpoints(pool_key,exam_id,stage,test_type,section,language,questions_json)
+    VALUES(?,?,?,?,?,?,?)
+    ON CONFLICT(pool_key) DO UPDATE SET questions_json=excluded.questions_json,updated_at=CURRENT_TIMESTAMP`)
+    .run(checkpointKey(p),p.examId,p.stage,p.testType,p.section||'',p.language,JSON.stringify(questions||[]));
+}
+function clearGenerationCheckpoint(p){
+  db.prepare('DELETE FROM generation_checkpoints WHERE pool_key=?').run(checkpointKey(p));
+}
+
+function importQuestions(items){
+ const insert=db.prepare(`INSERT OR IGNORE INTO question_bank
+ (id,exam_id,stage,section_id,section_name,language,topic,subtopic,difficulty,question,options_json,answer,solution,short_trick,source,group_id,group_type,shared_stem,group_order)
+ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+ const tx=db.transaction(rows=>{
+  let added=0,skipped=0;
+  for(const q of rows){
+   const options=Array.isArray(q.options)?q.options.map(String):[];
+   const answer=Number(q.answer);
+   if(!q.question||!q.sectionId||![4,5].includes(options.length)||!Number.isInteger(answer)||answer<0||answer>=options.length){skipped++;continue}
+   const info=insert.run(q.id||id(),q.examId||'',q.stage||'',q.sectionId,String(q.sectionName||q.section||q.sectionId),
+    String(q.language||'ENGLISH').toUpperCase(),q.topic||'',q.subtopic||'',String(q.difficulty||'MEDIUM').toUpperCase(),
+    q.question,JSON.stringify(options),answer,q.solution||'',q.shortTrick||'',q.source||'MASTER_BANK',
+    q.groupId||'',String(q.groupType||'').toUpperCase(),q.sharedStem||'',Number(q.groupOrder||0));
+   if(info.changes)added++;else skipped++;
+  } return{added,skipped};
+ }); return tx(items||[]);
+}
+
+function bankCounts(){
+ return db.prepare(`SELECT section_id sectionId,section_name sectionName,language,difficulty,COUNT(*) count
+ FROM question_bank WHERE active=1 GROUP BY section_id,section_name,language,difficulty ORDER BY section_name,language,difficulty`).all();
+}
+function getBankCandidates(userId,{examId,stage,sectionId,language}){
+ const seenRows=db.prepare(`SELECT p.questions_json FROM attempts a JOIN papers p ON p.id=a.paper_id WHERE a.user_id=?`).all(userId);
+ const seen=new Set();
+ for(const r of seenRows){try{for(const q of JSON.parse(r.questions_json)||[])seen.add(String(q.id||q.question||'').trim().toLowerCase())}catch{}}
+ const lang=String(language||'ENGLISH').toUpperCase();
+ const rows=db.prepare(`SELECT * FROM question_bank WHERE active=1 AND section_id=? AND language=?
+  AND (exam_id='' OR exam_id=?) AND (stage='' OR stage=?) ORDER BY RANDOM()`).all(sectionId,lang,examId,stage);
+ const mapped=rows.map(r=>({id:r.id,sectionId:r.section_id,section:r.section_name,topic:r.topic,subtopic:r.subtopic,
+  difficulty:String(r.difficulty||'MEDIUM').toUpperCase(),question:r.question,options:JSON.parse(r.options_json),answer:r.answer,
+  solution:r.solution,shortTrick:r.short_trick,groupId:r.group_id||'',groupType:r.group_type||'',
+  sharedStem:r.shared_stem||'',groupOrder:Number(r.group_order||0)}));
+ const fresh=mapped.filter(r=>!seen.has(String(r.id||r.question||'').trim().toLowerCase()));
+ const old=mapped.filter(r=>!fresh.includes(r));
+ return [...fresh,...old];
+}
+
+function pickBankQuestions(userId,{examId,stage,sectionId,sectionName,language,count}){
+ const seenRows=db.prepare(`SELECT p.questions_json FROM attempts a JOIN papers p ON p.id=a.paper_id WHERE a.user_id=?`).all(userId);
+ const seen=new Set();
+ for(const r of seenRows){try{for(const q of JSON.parse(r.questions_json)||[])seen.add(String(q.question||'').trim().toLowerCase())}catch{}}
+ const lang=String(language||'ENGLISH').toUpperCase();
+ const rows=db.prepare(`SELECT * FROM question_bank WHERE active=1 AND section_id=? AND language=?
+ AND (exam_id='' OR exam_id=?) AND (stage='' OR stage=?) ORDER BY RANDOM()`).all(sectionId,lang,examId,stage);
+ const fresh=rows.filter(r=>!seen.has(String(r.question||'').trim().toLowerCase()));
+ const pool=[...fresh,...rows.filter(r=>!fresh.includes(r))];
+ if(pool.length<count)return null;
+ return pool.slice(0,count).map(r=>({id:r.id,sectionId:r.section_id,section:r.section_name||sectionName,topic:r.topic,
+ subtopic:r.subtopic,difficulty:r.difficulty,question:r.question,options:JSON.parse(r.options_json),answer:r.answer,
+ solution:r.solution,shortTrick:r.short_trick,groupId:r.group_id||'',groupType:r.group_type||'',sharedStem:r.shared_stem||'',groupOrder:Number(r.group_order||0)}));
+}
+
+module.exports={db,createUser,getUserByIdentifier,getUserById,savePaper,readyCount,allocatePaper,paperById,startAttempt,submitAttempt,history,attemptDetail,stats,getState,setState,getGenerationCheckpoint,saveGenerationCheckpoint,clearGenerationCheckpoint,importQuestions,bankCounts,getBankCandidates,pickBankQuestions};

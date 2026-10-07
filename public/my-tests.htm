@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>My Tests | ExamMock AI</title>
+  <link rel="stylesheet" href="css/app.css">
+  <style>
+    .historyCards{display:none}
+    .statusBadge{display:inline-block;padding:5px 9px;border-radius:999px;font-size:11px;font-weight:900}
+    .statusBadge.done{background:#dcfce7;color:#166534}
+    .statusBadge.progress{background:#fef3c7;color:#92400e}
+    .attemptMeta{font-size:12px;color:#64748b;margin-top:4px}
+    .historyActions{display:flex;gap:7px;flex-wrap:wrap}
+    .historyActions .btn{white-space:nowrap}
+    .historyCard{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:16px;margin-bottom:12px}
+    .historyCardTop{display:flex;justify-content:space-between;gap:12px}
+    .historyCardGrid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:14px 0}
+    .historyCardGrid div{background:#f8fafc;border-radius:10px;padding:9px}
+    .historyCardGrid span{display:block;font-size:11px;color:#64748b}
+    .historyCardGrid b{display:block;margin-top:3px}
+    @media(max-width:800px){
+      .tablewrap table{display:none}
+      .historyCards{display:block}
+    }
+  </style>
+</head>
+<body>
+<div id="appNav"></div>
+<main class="container">
+  <div class="pagehead">
+    <span class="eyebrow">MY TESTS</span>
+    <h1>Attempt History</h1>
+    <p class="muted">Every attempt stays here. Review completed attempts or retry the exact same paper.</p>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Exam</th>
+          <th>Test</th>
+          <th>Language</th>
+          <th>Status</th>
+          <th>Score</th>
+          <th>C / W / U</th>
+          <th>Accuracy</th>
+          <th>Time</th>
+          <th>Date</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+
+    <div id="cards" class="historyCards"></div>
+    <div id="empty" class="empty hidden">No attempts yet. Start your first mock.</div>
+  </div>
+</main>
+
+<script src="js/common.js"></script>
+<script src="js/history.js"></script>
+</body>
+</html>

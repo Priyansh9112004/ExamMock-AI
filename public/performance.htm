@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Performance | ExamMock AI</title><link rel="stylesheet" href="css/app.css">
+<style>
+.perfGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.perfCard{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:17px}.perfCard span{display:block;color:#64748b;font-size:12px}.perfCard b{display:block;font-size:25px;margin-top:5px}
+.analysisGrid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.analysisTable{width:100%;border-collapse:collapse}.analysisTable th,.analysisTable td{padding:11px;border-bottom:1px solid #e2e8f0;text-align:left}.analysisTable th{font-size:12px;color:#64748b}
+.topicRow{padding:13px 0;border-bottom:1px solid #e2e8f0}.topicHead{display:flex;justify-content:space-between;gap:12px}.bar{height:8px;background:#e2e8f0;border-radius:999px;overflow:hidden;margin-top:8px}.bar>i{display:block;height:100%;background:#0f2744;border-radius:999px}
+.recentItem{display:flex;justify-content:space-between;gap:15px;align-items:center;padding:13px 0;border-bottom:1px solid #e2e8f0}
+@media(max-width:900px){.perfGrid{grid-template-columns:repeat(2,1fr)}.analysisGrid{grid-template-columns:1fr}}@media(max-width:520px){.perfGrid{grid-template-columns:1fr}.recentItem{align-items:flex-start;flex-direction:column}}
+</style>
+</head><body><div id="appNav"></div><main class="container">
+<div class="pagehead"><span class="eyebrow">PERFORMANCE</span><h1>Performance Analysis</h1><p class="muted">Track scores, accuracy, section performance and the topics that need the most work.</p></div>
+<div class="perfGrid">
+<div class="perfCard"><span>Completed Mocks</span><b id="tests">0</b></div>
+<div class="perfCard"><span>Average Accuracy</span><b id="acc">0%</b></div>
+<div class="perfCard"><span>Best Score %</span><b id="best">0%</b></div>
+<div class="perfCard"><span>Aggregate Score %</span><b id="agg">0%</b></div>
+<div class="perfCard"><span>Total Correct</span><b id="correct">0</b></div>
+<div class="perfCard"><span>Total Wrong</span><b id="wrong">0</b></div>
+<div class="perfCard"><span>Total Unattempted</span><b id="unattempted">0</b></div>
+<div class="perfCard"><span>Avg. Time / Mock</span><b id="avgTime">00:00</b></div>
+</div>
+<section class="section"><div class="analysisGrid">
+<div class="panel"><h2>Weak Topics</h2><p class="muted">Prioritized using your actual attempted-question error rate.</p><div id="weakTopics"></div></div>
+<div class="panel"><h2>Strong Topics</h2><p class="muted">Topics where your attempted-question accuracy is strongest.</p><div id="strongTopics"></div></div>
+</div></section>
+<section class="section"><div class="panel"><h2>Section Performance</h2><div style="overflow:auto"><table class="analysisTable"><thead><tr><th>Section</th><th>Questions</th><th>Correct</th><th>Wrong</th><th>Unattempted</th><th>Accuracy</th><th>Score</th></tr></thead><tbody id="sectionRows"></tbody></table></div></div></section>
+<section class="section"><div class="panel"><h2>Recent Performance</h2><div id="recent"></div></div></section>
+</main><script src="js/common.js"></script><script src="js/performance.js"></script></body></html>
