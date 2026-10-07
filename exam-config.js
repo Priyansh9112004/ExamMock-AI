@@ -35,4 +35,6 @@ const EXAMS = {
   "ctet|Paper-II": { examId:"ctet", exam:"CTET", category:"teaching", stage:"Paper-II", duration:9000, positive:1, negative:0, sections:[
     {id:"cdp",name:"Child Development & Pedagogy",count:30},{id:"lang1",name:"Language I",count:30,languageSubject:true},{id:"lang2",name:"Language II",count:30,languageSubject:true},{id:"subject",name:"Mathematics & Science / Social Studies",count:60}] }
 };
+const FIVE_OPTION = new Set(['ibps-clerk', 'sbi-clerk', 'rbi-assistant', 'ibps-rrb-clerk', 'sbi-po']);
+for (const cfg of Object.values(EXAMS)) cfg.optionCount = FIVE_OPTION.has(cfg.examId) ? 5 : 4;
 module.exports={EXAMS};

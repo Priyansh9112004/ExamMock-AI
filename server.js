@@ -1,26 +1,128 @@
 require('dotenv').config();
-const express=require('express'),path=require('path');
-const {routes,requireAuth}=require('./auth');
-const {EXAMS}=require('./exam-config');
-const db=require('./database');
-const {buildInstantPaper}=require('./bank-engine');
-const app=express(),PORT=Number(process.env.PORT||3000);
-app.use(express.json({limit:'3mb'}));app.use(express.static(path.join(__dirname,'public')));routes(app);
-function cleanPaper(row,attemptId){return{attemptId,paperId:row.id,examId:row.exam_id,exam:row.exam_name,stage:row.stage,testType:row.test_type,section:row.section,language:row.language,questions:JSON.parse(row.questions_json)}}
-app.get('/api/health',(req,res)=>res.json({ok:true,mode:'INSTANT_QUESTION_BANK',authMode:'USER_ID_OR_EMAIL_PASSWORD'}));
-app.get('/api/exams',(req,res)=>res.json({ok:true,exams:Object.values(EXAMS)}));
-app.get('/api/question-bank/counts',requireAuth,(req,res)=>res.json({ok:true,counts:db.bankCounts()}));
-app.post('/api/start-mock',requireAuth,(req,res)=>{try{
- const p={examId:req.body.examId,stage:req.body.stage,testType:req.body.testType==='sectional'?'sectional':'full',
- section:req.body.testType==='sectional'?String(req.body.section||''):'',
- language:String(req.body.language||'ENGLISH').toUpperCase()==='HINDI'?'HINDI':'ENGLISH'};
- const row=buildInstantPaper(req.auth.sub,p),attemptId=db.startAttempt(req.auth.sub,row.id);
- res.json({ok:true,paper:cleanPaper(row,attemptId)});
-}catch(e){res.status(e.code==='BANK_INSUFFICIENT'?503:400).json({ok:false,code:e.code||'START_FAILED',error:e.message})}});
-app.post('/api/submit-result',requireAuth,(req,res)=>{try{const r=db.submitAttempt(req.auth.sub,Number(req.body.attemptId),req.body);res.json({ok:true,attemptId:r.id})}catch(e){res.status(400).json({ok:false,error:e.message})}});
-app.get('/api/history',requireAuth,(req,res)=>res.json({ok:true,attempts:db.history(req.auth.sub)}));
-app.get('/api/attempt/:id',requireAuth,(req,res)=>{const a=db.attemptDetail(req.auth.sub,Number(req.params.id));if(!a)return res.status(404).json({ok:false,error:'Attempt not found'});res.json({ok:true,attempt:a})});
-app.post('/api/attempt/:id/retry',requireAuth,(req,res)=>{const old=db.attemptDetail(req.auth.sub,Number(req.params.id));if(!old)return res.status(404).json({ok:false,error:'Attempt not found'});const row=db.paperById(old.paper_id),attemptId=db.startAttempt(req.auth.sub,row.id);res.json({ok:true,paper:cleanPaper(row,attemptId)})});
-app.get('/api/performance',requireAuth,(req,res)=>res.json({ok:true,stats:db.stats(req.auth.sub)}));
-app.get('/',(req,res)=>res.sendFile(path.join(__dirname,'public','index.htm')));
-app.listen(PORT,()=>{console.log('\n========================================\n ExamMock AI Backend Running');console.log(' Mode: INSTANT QUESTION BANK');console.log(` Website: http://localhost:${PORT}`);console.log(' AI generation worker: DISABLED');console.log('========================================\n')});
+const express = require('express');
+const path = require('path');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const { routes, requireAuth } = require('./auth');
+const { EXAMS } = require('./exam-config');
+const db = require('./database');
+const { buildInstantPaper } = require('./bank-engine');
+const { gradeAttempt } = require('./grading');
+const { userError } = require('./errors');
+
+const app = express();
+const PORT = Number(process.env.PORT || 3000);
+
+if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY) || 1);
+app.disable('x-powered-by');
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(express.json({ limit: '1mb' }));
+app.use((req, res, next) => { req.body ??= {}; next(); }); // Express 5: body undefined ho sakti hai
+app.use(express.static(path.join(__dirname, 'public')));
+app.use('/api', rateLimit({
+  windowMs: 15 * 60 * 1000, limit: 600, standardHeaders: true, legacyHeaders: false,
+  message: { ok: false, error: 'Too many requests. Slow down.' }
+}));
+
+function publicQuestion(q) {
+  const { answer, solution, shortTrick, ...rest } = q;
+  return rest;
+}
+
+function paperDuration(cfg, testType, qCount) {
+  const full = Number(cfg?.duration) || 3600;
+  if (!cfg || testType !== 'sectional') return full;
+  const total = cfg.sections.reduce((s, x) => s + Number(x.count || 0), 0) || qCount;
+  return Math.max(600, Math.round(full * qCount / total));
+}
+
+function cleanPaper(row, attemptId) {
+  const cfg = EXAMS[`${row.exam_id}|${row.stage}`];
+  const questions = JSON.parse(row.questions_json);
+  return {
+    attemptId, paperId: row.id, examId: row.exam_id, exam: row.exam_name, stage: row.stage,
+    testType: row.test_type, section: row.section, language: row.language,
+    duration: paperDuration(cfg, row.test_type, questions.length),
+    questions: questions.map(publicQuestion)
+  };
+}
+
+function sendError(res, e) {
+  if (e.expose) return res.status(e.status || 400).json({ ok: false, code: e.code, error: e.message });
+  console.error('[API]', e);
+  res.status(500).json({ ok: false, error: 'Something went wrong. Please try again.' });
+}
+
+routes(app);
+
+app.get('/api/health', (req, res) => res.json({ ok: true }));
+app.get('/api/exams', (req, res) => res.json({ ok: true, exams: Object.values(EXAMS) }));
+app.get('/api/question-bank/counts', requireAuth, (req, res) => res.json({ ok: true, counts: db.bankCounts() }));
+
+app.post('/api/start-mock', requireAuth, (req, res) => {
+  try {
+    const isSectional = req.body.testType === 'sectional';
+    const p = {
+      examId: String(req.body.examId || ''),
+      stage: String(req.body.stage || ''),
+      testType: isSectional ? 'sectional' : 'full',
+      section: isSectional ? String(req.body.section || '') : '',
+      language: String(req.body.language || 'ENGLISH').toUpperCase() === 'HINDI' ? 'HINDI' : 'ENGLISH'
+    };
+    const row = buildInstantPaper(req.auth.sub, p);
+    const attemptId = db.startAttempt(req.auth.sub, row.id);
+    res.json({ ok: true, paper: cleanPaper(row, attemptId) });
+  } catch (e) { sendError(res, e); }
+});
+
+app.post('/api/submit-result', requireAuth, (req, res) => {
+  try {
+    const attemptId = Number(req.body.attemptId);
+    if (!Number.isInteger(attemptId)) throw userError('Invalid attempt');
+    const result = db.submitAttempt(req.auth.sub, attemptId, (questions, a) => {
+      const cfg = EXAMS[`${a.exam_id}|${a.stage}`];
+      return gradeAttempt(questions, req.body.responses ?? req.body.answers, {
+        cfg, startedAt: a.started_at, durationSec: paperDuration(cfg, a.test_type, questions.length)
+      });
+    });
+    res.json({ ok: true, attemptId, result });
+  } catch (e) { sendError(res, e); }
+});
+
+app.get('/api/history', requireAuth, (req, res) => res.json({ ok: true, attempts: db.history(req.auth.sub) }));
+
+app.get('/api/attempt/:id', requireAuth, (req, res) => {
+  const a = db.attemptDetail(req.auth.sub, Number(req.params.id));
+  if (!a) return res.status(404).json({ ok: false, error: 'Attempt not found' });
+  if (!a.submitted_at) {
+    const { questions_json, ...rest } = a;
+    return res.json({ ok: true, attempt: { ...rest, questions: a.questions.map(publicQuestion) } });
+  }
+  res.json({ ok: true, attempt: a });
+});
+
+app.post('/api/attempt/:id/retry', requireAuth, (req, res) => {
+  try {
+    const old = db.attemptDetail(req.auth.sub, Number(req.params.id));
+    if (!old) throw userError('Attempt not found', 404);
+    const row = db.paperById(old.paper_id);
+    if (!row) throw userError('Paper no longer available', 404);
+    const attemptId = db.startAttempt(req.auth.sub, row.id);
+    res.json({ ok: true, paper: cleanPaper(row, attemptId) });
+  } catch (e) { sendError(res, e); }
+});
+
+app.get('/api/performance', requireAuth, (req, res) => res.json({ ok: true, stats: db.stats(req.auth.sub) }));
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.htm')));
+
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.parse.failed') return res.status(400).json({ ok: false, error: 'Invalid JSON' });
+  if (err.type === 'entity.too.large') return res.status(413).json({ ok: false, error: 'Request too large' });
+  console.error('[SERVER]', err);
+  res.status(500).json({ ok: false, error: 'Server error' });
+});
+
+const server = app.listen(PORT, () => console.log(`ExamMock AI running on http://localhost:${PORT}`));
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => server.close(() => { db.db.close(); process.exit(0); }));
+}

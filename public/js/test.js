@@ -18,31 +18,11 @@ let left = duration();
 let submitting = false;
 let timerHandle = null;
 
-function duration() {
-    const map = {
-        "ibps-clerk|Prelims": 3600,
-        "ssc-cgl|Tier-I": 3600,
-        "ssc-chsl|Tier-I": 3600,
-        "rrb-ntpc-graduate|CBT-1": 5400,
-        "rrb-ntpc-ug|CBT-1": 5400,
-        "rrb-group-d|CBT": 5400,
-        "ctet|Paper-I": 9000
-    };
-
-    return map[`${paper.examId}|${paper.stage}`] || 3600;
-}
+function duration() { return Number(paper.duration) || 3600; }
 
 function marking() {
-    const map = {
-        "ssc-cgl|Tier-I": [2, 0.5],
-        "ssc-chsl|Tier-I": [2, 0.5],
-        "rrb-ntpc-graduate|CBT-1": [1, 1 / 3],
-        "rrb-ntpc-ug|CBT-1": [1, 1 / 3],
-        "rrb-group-d|CBT": [1, 1 / 3]
-    };
-
-    return map[`${paper.examId}|${paper.stage}`] ||
-        [1, paper.examId === "ctet" ? 0 : 0.25];
+  const q = qs[0] || {};
+  return [Number(q.positive ?? 1), Number(q.negative ?? 0)];
 }
 
 function sectionName(q) {
@@ -248,128 +228,40 @@ function closeSubmitModal() {
 }
 
 async function confirmSubmit(auto = false) {
-    if (submitting) return;
-    submitting = true;
+  if (submitting) return;
+  submitting = true;
+  submitModal.classList.add("hidden");
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Submitting...";
+  if (timerHandle) clearInterval(timerHandle);
 
-    submitModal.classList.add("hidden");
-    submitBtn.disabled = true;
-    submitBtn.textContent = "Submitting...";
+  const responses = qs.map((_, n) => ({
+    questionIndex: n,
+    selectedAnswer: answers[n] !== undefined ? answers[n] : null,
+    markedForReview: status[n] === "review"
+  }));
 
-    if (timerHandle) clearInterval(timerHandle);
-
-    const [pos, neg] = marking();
-    let correct = 0;
-    let wrong = 0;
-
-    const details = qs.map((q, n) => {
-        const selected = answers[n];
-        const attempted = selected !== undefined;
-        const ok = attempted && Number(selected) === Number(q.answer);
-
-        if (ok) correct++;
-        else if (attempted) wrong++;
-
-        return {
-            questionIndex: n,
-            section: sectionName(q),
-            topic: q.topic || "",
-            subtopic: q.subtopic || "",
-            selectedAnswer: attempted ? selected : null,
-            correctAnswer: q.answer,
-            isAttempted: attempted,
-            isCorrect: ok,
-            markedForReview: status[n] === "review",
-            marksAwarded: ok ? pos : attempted ? -neg : 0,
-            question: q.question,
-            options: q.options,
-            solution: q.solution || "",
-            shortTrick: q.shortTrick || ""
-        };
+  try {
+    const data = await api("/api/submit-result", {
+      method: "POST",
+      body: JSON.stringify({ attemptId: paper.attemptId, responses, autoSubmitted: !!auto })
     });
-
-    const unattempted = qs.length - correct - wrong;
-    const score = correct * pos - wrong * neg;
-    const maxScore = qs.length * pos;
-    const accuracy = (correct + wrong)
-        ? (correct / (correct + wrong)) * 100
-        : 0;
-
-    const totalTimeSeconds = Math.min(
-        duration(),
-        Math.max(0, Math.round((Date.now() - started) / 1000))
-    );
-
-    const sectionMap = {};
-
-    details.forEach(d => {
-        if (!sectionMap[d.section]) {
-            sectionMap[d.section] = {
-                section: d.section,
-                total: 0,
-                correct: 0,
-                wrong: 0,
-                unattempted: 0,
-                score: 0
-            };
-        }
-
-        const s = sectionMap[d.section];
-        s.total++;
-        s.score += d.marksAwarded;
-
-        if (!d.isAttempted) s.unattempted++;
-        else if (d.isCorrect) s.correct++;
-        else s.wrong++;
-    });
-
-    const sections = Object.values(sectionMap).map(s => ({
-        ...s,
-        accuracy: (s.correct + s.wrong)
-            ? (s.correct / (s.correct + s.wrong)) * 100
-            : 0
+    localStorage.setItem("lastResult", JSON.stringify({
+      ...paper,
+      ...data.result,
+      attemptId: paper.attemptId,
+      autoSubmitted: !!auto,
+      completedAt: new Date().toISOString()
     }));
-
-    const payload = {
-        attemptId: paper.attemptId,
-        score,
-        maxScore,
-        correct,
-        wrong,
-        unattempted,
-        accuracy,
-        totalTimeSeconds,
-        answers: details,
-        sections,
-        autoSubmitted: !!auto
-    };
-
-    try {
-        await api("/api/submit-result", {
-            method: "POST",
-            body: JSON.stringify(payload)
-        });
-
-        localStorage.setItem(
-            "lastResult",
-            JSON.stringify({
-                ...payload,
-                ...paper,
-                completedAt: new Date().toISOString()
-            })
-        );
-
-        localStorage.removeItem("activePaper");
-        location.href = "result.htm";
-    } catch (e) {
-        submitting = false;
-        submitBtn.disabled = false;
-        submitBtn.textContent = "Submit Test";
-
-        // Resume timer only if time is still available.
-        if (left > 0) startTimer();
-
-        alert(e.message || "Could not submit test. Please try again.");
-    }
+    localStorage.removeItem("activePaper");
+    location.href = "result.htm";
+  } catch (e) {
+    submitting = false;
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Submit Test";
+    if (left > 0) startTimer();
+    alert(e.message || "Could not submit test. Please try again.");
+  }
 }
 
 function startTimer() {

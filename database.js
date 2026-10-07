@@ -1,4 +1,7 @@
 const Database=require('better-sqlite3'); const path=require('path'); const crypto=require('crypto');
+const fs = require('fs');
+const { userError } = require('./errors');
+fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
 const db=new Database(path.join(__dirname,'data','exammock.db')); db.pragma('journal_mode = WAL'); db.pragma('foreign_keys = ON');
 db.exec(`
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,name TEXT NOT NULL,user_id TEXT UNIQUE COLLATE NOCASE,email TEXT UNIQUE COLLATE NOCASE,password_hash TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -103,6 +106,18 @@ function repairAttemptsForeignKeys(){
 }
 repairAttemptsForeignKeys();
 
+db.exec(`CREATE TABLE IF NOT EXISTS user_seen_questions(
+  user_id TEXT NOT NULL, question_id TEXT NOT NULL, PRIMARY KEY(user_id, question_id)
+) WITHOUT ROWID;`);
+if (db.prepare('SELECT COUNT(*) c FROM user_seen_questions').get().c === 0) {
+  const ins = db.prepare('INSERT OR IGNORE INTO user_seen_questions(user_id,question_id) VALUES(?,?)');
+  const rows = db.prepare('SELECT a.user_id, p.questions_json FROM attempts a JOIN papers p ON p.id=a.paper_id').all();
+  db.transaction(() => {
+    for (const r of rows) {
+      try { for (const q of JSON.parse(r.questions_json) || []) if (q.id) ins.run(r.user_id, String(q.id)); } catch {}
+    }
+  })();
+}
 const id=()=>crypto.randomUUID();
 function createUser({name,userId,email,passwordHash}){const userKey=id();db.prepare('INSERT INTO users(id,name,user_id,email,password_hash) VALUES(?,?,?,?,?)').run(userKey,name,userId,email,passwordHash);return getUserById(userKey)}
 function getUserByIdentifier(identifier){const v=String(identifier||'').trim();return db.prepare('SELECT * FROM users WHERE user_id=? COLLATE NOCASE OR email=? COLLATE NOCASE LIMIT 1').get(v,v.toLowerCase())}
@@ -111,8 +126,35 @@ function savePaper(p){db.prepare(`INSERT INTO papers(id,exam_id,exam_name,stage,
 function readyCount(p){return db.prepare(`SELECT COUNT(*) c FROM papers WHERE exam_id=? AND stage=? AND test_type=? AND section=? AND language=? AND status='READY'`).get(p.examId,p.stage,p.testType,p.section||'',p.language).c}
 function allocatePaper(userId,p){return db.prepare(`SELECT p.* FROM papers p WHERE p.exam_id=? AND p.stage=? AND p.test_type=? AND p.section=? AND p.language=? AND p.status='READY' AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.user_id=? AND a.paper_id=p.id) ORDER BY p.created_at ASC LIMIT 1`).get(p.examId,p.stage,p.testType,p.section||'',p.language,userId)}
 function paperById(id){return db.prepare('SELECT * FROM papers WHERE id=?').get(id)}
-function startAttempt(userId,paperId){const info=db.prepare('INSERT INTO attempts(user_id,paper_id) VALUES(?,?)').run(userId,paperId);return Number(info.lastInsertRowid)}
-function submitAttempt(userId,attemptId,r){const a=db.prepare('SELECT * FROM attempts WHERE id=? AND user_id=?').get(attemptId,userId);if(!a)throw Error('Attempt not found');if(a.submitted_at)throw Error('Attempt already submitted');db.prepare(`UPDATE attempts SET submitted_at=CURRENT_TIMESTAMP,score=?,max_score=?,correct_count=?,wrong_count=?,unattempted_count=?,accuracy=?,total_time_seconds=?,answers_json=?,sections_json=? WHERE id=? AND user_id=?`).run(r.score,r.maxScore,r.correct,r.wrong,r.unattempted,r.accuracy,r.totalTimeSeconds,JSON.stringify(r.answers||[]),JSON.stringify(r.sections||[]),attemptId,userId);return attemptDetail(userId,attemptId)}
+const startAttemptTx = db.transaction((userId, paperId) => {
+  const info = db.prepare('INSERT INTO attempts(user_id,paper_id) VALUES(?,?)').run(userId, paperId);
+  const row = db.prepare('SELECT questions_json FROM papers WHERE id=?').get(paperId);
+  const ins = db.prepare('INSERT OR IGNORE INTO user_seen_questions(user_id,question_id) VALUES(?,?)');
+  for (const q of JSON.parse(row.questions_json) || []) if (q.id) ins.run(userId, String(q.id));
+  return Number(info.lastInsertRowid);
+});
+function startAttempt(userId, paperId) { return startAttemptTx(userId, paperId); }
+const submitTx = db.transaction((userId, attemptId, grade) => {
+  const a = db.prepare(`SELECT a.*, p.exam_id, p.stage, p.test_type, p.questions_json
+    FROM attempts a JOIN papers p ON p.id=a.paper_id WHERE a.id=? AND a.user_id=?`).get(attemptId, userId);
+  if (!a) throw userError('Attempt not found', 404);
+  if (a.submitted_at) {
+    return {
+      score: a.score, maxScore: a.max_score, correct: a.correct_count, wrong: a.wrong_count,
+      unattempted: a.unattempted_count, accuracy: a.accuracy, totalTimeSeconds: a.total_time_seconds,
+      answers: JSON.parse(a.answers_json || '[]'), sections: JSON.parse(a.sections_json || '[]')
+    };
+  }
+  const r = grade(JSON.parse(a.questions_json), a);
+  const info = db.prepare(`UPDATE attempts SET submitted_at=CURRENT_TIMESTAMP, score=?, max_score=?, correct_count=?,
+    wrong_count=?, unattempted_count=?, accuracy=?, total_time_seconds=?, answers_json=?, sections_json=?
+    WHERE id=? AND user_id=? AND submitted_at IS NULL`)
+    .run(r.score, r.maxScore, r.correct, r.wrong, r.unattempted, r.accuracy, r.totalTimeSeconds,
+         JSON.stringify(r.answers), JSON.stringify(r.sections), attemptId, userId);
+  if (info.changes !== 1) throw userError('Attempt already submitted', 409);
+  return r;
+});
+function submitAttempt(userId, attemptId, grade) { return submitTx(userId, attemptId, grade); }
 function history(userId){return db.prepare(`SELECT a.id attemptId,a.started_at startedAt,a.submitted_at submittedAt,a.score,a.max_score maxScore,a.correct_count correct,a.wrong_count wrong,a.unattempted_count unattempted,a.accuracy,a.total_time_seconds totalTimeSeconds,p.id paperId,p.exam_id examId,p.exam_name examName,p.stage,p.test_type testType,p.section,p.language FROM attempts a JOIN papers p ON p.id=a.paper_id WHERE a.user_id=? ORDER BY a.id DESC`).all(userId)}
 function attemptDetail(userId,attemptId){const row=db.prepare(`SELECT a.*,p.exam_id,p.exam_name,p.stage,p.test_type,p.section,p.language,p.questions_json FROM attempts a JOIN papers p ON p.id=a.paper_id WHERE a.id=? AND a.user_id=?`).get(attemptId,userId);if(!row)return null;return {...row,questions:JSON.parse(row.questions_json),answers:row.answers_json?JSON.parse(row.answers_json):[],sections:row.sections_json?JSON.parse(row.sections_json):[]}}
 function stats(userId){
@@ -210,35 +252,22 @@ function bankCounts(){
  return db.prepare(`SELECT section_id sectionId,section_name sectionName,language,difficulty,COUNT(*) count
  FROM question_bank WHERE active=1 GROUP BY section_id,section_name,language,difficulty ORDER BY section_name,language,difficulty`).all();
 }
-function getBankCandidates(userId,{examId,stage,sectionId,language}){
- const seenRows=db.prepare(`SELECT p.questions_json FROM attempts a JOIN papers p ON p.id=a.paper_id WHERE a.user_id=?`).all(userId);
- const seen=new Set();
- for(const r of seenRows){try{for(const q of JSON.parse(r.questions_json)||[])seen.add(String(q.id||q.question||'').trim().toLowerCase())}catch{}}
- const lang=String(language||'ENGLISH').toUpperCase();
- const rows=db.prepare(`SELECT * FROM question_bank WHERE active=1 AND section_id=? AND language=?
-  AND (exam_id='' OR exam_id=?) AND (stage='' OR stage=?) ORDER BY RANDOM()`).all(sectionId,lang,examId,stage);
- const mapped=rows.map(r=>({id:r.id,sectionId:r.section_id,section:r.section_name,topic:r.topic,subtopic:r.subtopic,
-  difficulty:String(r.difficulty||'MEDIUM').toUpperCase(),question:r.question,options:JSON.parse(r.options_json),answer:r.answer,
-  solution:r.solution,shortTrick:r.short_trick,groupId:r.group_id||'',groupType:r.group_type||'',
-  sharedStem:r.shared_stem||'',groupOrder:Number(r.group_order||0)}));
- const fresh=mapped.filter(r=>!seen.has(String(r.id||r.question||'').trim().toLowerCase()));
- const old=mapped.filter(r=>!fresh.includes(r));
- return [...fresh,...old];
+function getBankCandidates(userId, { examId, stage, sectionId, language }) {
+  const lang = String(language || 'ENGLISH').toUpperCase();
+  const rows = db.prepare(`
+    SELECT qb.*, (usq.question_id IS NOT NULL) AS seen
+    FROM question_bank qb
+    LEFT JOIN user_seen_questions usq ON usq.user_id=? AND usq.question_id=qb.id
+    WHERE qb.active=1 AND qb.section_id=? AND qb.language=?
+      AND (qb.exam_id='' OR qb.exam_id=?) AND (qb.stage='' OR qb.stage=?)
+    ORDER BY seen ASC, RANDOM()`).all(userId, sectionId, lang, examId, stage);
+  return rows.map(r => ({
+    id: r.id, sectionId: r.section_id, section: r.section_name, topic: r.topic, subtopic: r.subtopic,
+    difficulty: String(r.difficulty || 'MEDIUM').toUpperCase(), question: r.question,
+    options: JSON.parse(r.options_json), answer: r.answer, solution: r.solution, shortTrick: r.short_trick,
+    groupId: r.group_id || '', groupType: r.group_type || '', sharedStem: r.shared_stem || '',
+    groupOrder: Number(r.group_order || 0), seen: !!r.seen
+  }));
 }
 
-function pickBankQuestions(userId,{examId,stage,sectionId,sectionName,language,count}){
- const seenRows=db.prepare(`SELECT p.questions_json FROM attempts a JOIN papers p ON p.id=a.paper_id WHERE a.user_id=?`).all(userId);
- const seen=new Set();
- for(const r of seenRows){try{for(const q of JSON.parse(r.questions_json)||[])seen.add(String(q.question||'').trim().toLowerCase())}catch{}}
- const lang=String(language||'ENGLISH').toUpperCase();
- const rows=db.prepare(`SELECT * FROM question_bank WHERE active=1 AND section_id=? AND language=?
- AND (exam_id='' OR exam_id=?) AND (stage='' OR stage=?) ORDER BY RANDOM()`).all(sectionId,lang,examId,stage);
- const fresh=rows.filter(r=>!seen.has(String(r.question||'').trim().toLowerCase()));
- const pool=[...fresh,...rows.filter(r=>!fresh.includes(r))];
- if(pool.length<count)return null;
- return pool.slice(0,count).map(r=>({id:r.id,sectionId:r.section_id,section:r.section_name||sectionName,topic:r.topic,
- subtopic:r.subtopic,difficulty:r.difficulty,question:r.question,options:JSON.parse(r.options_json),answer:r.answer,
- solution:r.solution,shortTrick:r.short_trick,groupId:r.group_id||'',groupType:r.group_type||'',sharedStem:r.shared_stem||'',groupOrder:Number(r.group_order||0)}));
-}
-
-module.exports={db,createUser,getUserByIdentifier,getUserById,savePaper,readyCount,allocatePaper,paperById,startAttempt,submitAttempt,history,attemptDetail,stats,getState,setState,getGenerationCheckpoint,saveGenerationCheckpoint,clearGenerationCheckpoint,importQuestions,bankCounts,getBankCandidates,pickBankQuestions};
+module.exports={db,createUser,getUserByIdentifier,getUserById,savePaper,readyCount,allocatePaper,paperById,startAttempt,submitAttempt,history,attemptDetail,stats,getState,setState,getGenerationCheckpoint,saveGenerationCheckpoint,clearGenerationCheckpoint,importQuestions,bankCounts,getBankCandidates};
