@@ -1,29 +1,33 @@
-if (!guard()) throw Error("login");
-
 let currentUser = auth.user();
+if (!currentUser || currentUser.role !== 'admin') {
+  location.replace("login.htm");
+  throw new Error("Unauthorized");
+}
+
 let allUsers = [];
 let allLogs = [];
 let allAttempts = [];
 let currentTab = 'users';
 
 async function initAdmin() {
-  if (!currentUser || currentUser.role !== 'admin') {
-    try {
-      const me = await api("/api/auth/me");
-      if (me && me.user) {
-        currentUser = me.user;
-        auth.set(auth.token(), me.user);
-      }
-    } catch (e) {}
-  }
+  try {
+    const me = await api("/api/auth/me");
+    if (me && me.user) {
+      currentUser = me.user;
+      auth.set(auth.token(), me.user);
+    }
+  } catch (e) {}
 
   if (!currentUser || currentUser.role !== 'admin') {
-    alert("Access restricted: Administrator privilege required.");
-    location.href = "index.htm";
+    location.replace("login.htm");
     return;
   }
 
-  nav("admin");
+  const badge = document.getElementById('adminUserBadge');
+  if (badge && currentUser) {
+    badge.textContent = `👑 ${currentUser.user_id || currentUser.userId || currentUser.email || 'admin@123'}`;
+  }
+
   refreshAdminData();
 }
 

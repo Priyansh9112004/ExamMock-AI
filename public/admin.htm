@@ -5,6 +5,19 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Admin Panel | ExamMock AI</title>
   <link rel="stylesheet" href="css/app.css">
+  <script>
+    (function(){
+      try {
+        var u = JSON.parse(localStorage.getItem('examMockUser') || 'null');
+        var t = localStorage.getItem('examMockToken');
+        if (!t || !u || u.role !== 'admin') {
+          location.replace('login.htm');
+        }
+      } catch(e) {
+        location.replace('login.htm');
+      }
+    })();
+  </script>
   <style>
     .adminGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
     .kpiCard { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 18px 20px; box-shadow: 0 2px 6px rgba(0,0,0,0.03); }
@@ -41,7 +54,20 @@
   </style>
 </head>
 <body>
-  <div id="appNav"></div>
+  <header style="background:#0f2744;color:#fff;border-bottom:1px solid rgba(255,255,255,0.1);padding:14px 0;">
+    <div class="container" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+      <div style="display:flex;align-items:center;gap:12px;">
+        <a href="admin.htm" style="color:#fff;text-decoration:none;font-size:18px;font-weight:900;letter-spacing:-0.5px;">ExamMock <span style="background:#2563eb;color:#fff;padding:3px 8px;border-radius:6px;font-size:12px;font-weight:800;letter-spacing:0.5px;margin-left:4px;">ADMIN</span></a>
+        <span style="background:rgba(37,99,235,0.25);border:1px solid rgba(37,99,235,0.4);padding:4px 10px;border-radius:999px;font-size:11px;font-weight:700;color:#93c5fd;">Live Audit & Control</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+        <a href="dashboard.htm" class="btn" style="background:rgba(255,255,255,0.12);color:#fff;border-color:rgba(255,255,255,0.2);font-size:13px;font-weight:600;">Candidate Portal</a>
+        <span id="adminUserBadge" style="font-size:13px;color:#cbd5e1;font-weight:600;">👑 admin@123</span>
+        <button class="btn" onclick="logout()" style="background:#dc2626;color:#fff;border:none;font-size:13px;padding:6px 14px;font-weight:700;cursor:pointer;">Logout</button>
+      </div>
+    </div>
+  </header>
+
 
   <main class="container" style="padding-top: 30px; padding-bottom: 60px;">
     <div class="pagehead" style="margin-bottom: 24px;">
