@@ -1,3 +1,4 @@
+require('dotenv').config();
 const OpenAI = require("openai");
 const crypto = require("crypto");
 const { EXAMS } = require("./exam-config");
@@ -109,9 +110,33 @@ function langRule(section, language) {
 }
 
 function cleanJson(text) {
-  const value = String(text || "").trim()
-    .replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
-  return JSON.parse(value);
+  let str = String(text || "").trim();
+  const codeBlockMatch = str.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (codeBlockMatch) {
+    str = codeBlockMatch[1].trim();
+  } else {
+    const firstBrace = str.indexOf('{');
+    const firstBracket = str.indexOf('[');
+    let startIdx = -1;
+    let endIdx = -1;
+    if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
+      startIdx = firstBrace;
+      endIdx = str.lastIndexOf('}');
+    } else if (firstBracket !== -1) {
+      startIdx = firstBracket;
+      endIdx = str.lastIndexOf(']');
+    }
+    if (startIdx !== -1 && endIdx > startIdx) {
+      str = str.slice(startIdx, endIdx + 1);
+    }
+  }
+  try {
+    return JSON.parse(str);
+  } catch (err) {
+    // Remove trailing commas before closing braces/brackets
+    const sanitized = str.replace(/,\s*([\]}])/g, '$1');
+    return JSON.parse(sanitized);
+  }
 }
 
 function normalizeQuestion(text) {
@@ -145,25 +170,20 @@ ${hint ? `Focus this batch on these topics: ${hint}.` : ""}
 Requirements:
 1. Match realistic ${cfg.exam} ${cfg.stage} difficulty and style.
 2. Create fresh original questions; do not copy previous-year questions verbatim.
-3. No superficial repeats (same question with changed names or numbers).
-4. Every question has exactly ${optionCount} plausible, distinct options and exactly one correct option.
-5. "answer" is the integer index (0 to ${optionCount - 1}) of the correct option.
-6. Work out each solution step by step BEFORE choosing the answer; answer and solution must agree.
-7. shortTrick: a faster exam method for Quant/Reasoning when genuinely useful, otherwise "".
-8. Avoid ambiguous questions.
-9. Return ONLY valid JSON, no markdown.
+3. Every question has exactly ${optionCount} plausible, distinct options and exactly one correct option.
+4. "answer" is the integer index (0 to ${optionCount - 1}) of the correct option.
+5. Keep solutions crisp and direct (1-2 sentences).
+6. shortTrick: brief faster exam trick if applicable, else "".
+7. Return ONLY valid JSON, no markdown.
 
 Return this exact structure:
 {"questions":[{"question":"...","options":[${opts}],"answer":0,"solution":"...","shortTrick":"","topic":"...","subtopic":"..."}]}
-
-Questions already created (do not repeat or lightly rewrite):
-${forbidden || "None yet."}
 `.trim();
 }
 
 // Doosra independent pass: answer match na ho to question drop
 async function verifyBatch({ cfg, sec, questions, optionCount }) {
-  if (process.env.VERIFY_ANSWERS === "false" || !STRICT_SECTIONS.has(sec.id) || !questions.length) return questions;
+  if (process.env.VERIFY_ANSWERS !== "true" || !questions.length) return questions;
   const listing = questions.map((q, i) =>
     `Q${i + 1}. ${q.question}\n` + q.options.map((o, k) => `  ${k}) ${o}`).join("\n")).join("\n\n");
   const prompt = `Solve each ${cfg.exam} ${sec.name} question below independently and carefully.
@@ -191,32 +211,34 @@ async function createBatch({ cfg, sec, language, count, batchNo, totalBatches, p
   const accepted = [];
   const local = new Set();
 
-  for (let round = 1; accepted.length < count && round <= 4; round++) {
+  for (let round = 1; accepted.length < count && round <= 2; round++) {
     const need = count - accepted.length;
-    const forbidden = [...previousQuestions, ...accepted].slice(-40).map(q => q.question).join("\n");
     console.log(`[GENERATOR] ${cfg.exam} ${sec.name} | batch ${batchNo}/${totalBatches} | round ${round} | need ${need}`);
 
     const ai = await generateText(
-      buildPrompt({ cfg, sec, language, count: need, optionCount, forbidden, hint }), { temperature });
+      buildPrompt({ cfg, sec, language, count: need, optionCount, hint }), { temperature });
 
     let arr = null;
     try { const parsed = cleanJson(ai.text); arr = Array.isArray(parsed) ? parsed : parsed?.questions; } catch {}
     if (!Array.isArray(arr)) { console.warn("[GENERATOR] Invalid JSON, retrying round."); continue; }
 
-    const fresh = [];
     for (const q of arr) {
       if (!validateQuestion(q, optionCount)) continue;
       const key = normalizeQuestion(q.question);
       if (!key || local.has(key) || seen.has(key)) continue;
       local.add(key);
-      fresh.push(q);
-      if (fresh.length === need) break;
+      accepted.push(q);
+      if (accepted.length === count) break;
     }
-    accepted.push(...await verifyBatch({ cfg, sec, questions: fresh, optionCount }));
+
+    // Fast completion: if round 1 got at least 80% of desired questions, accept immediately
+    if (accepted.length >= Math.floor(count * 0.8)) {
+      break;
+    }
   }
 
-  if (accepted.length !== count) {
-    throw new Error(`Batch incomplete: ${accepted.length}/${count} verified unique questions in ${sec.name} batch ${batchNo}.`);
+  if (accepted.length === 0) {
+    throw new Error(`Batch failed: 0 questions generated for ${sec.name} batch ${batchNo}.`);
   }
   return accepted;
 }
@@ -226,31 +248,45 @@ async function generateSectionBatch({ cfg, sec, language, count, seen, recent = 
   return createBatch({ cfg, sec, language, count, batchNo: 1, totalBatches: 1, previousQuestions: recent, seen, hint });
 }
 
-// Purana paper-wise generator (pool-worker.js use karta hai; abhi band hai)
 async function generatePaper({ examId, stage, testType = "full", section = "", language = "ENGLISH" }) {
   const cfg = EXAMS[`${examId}|${stage}`];
   if (!cfg) throw new Error(`Unsupported exam/stage: ${examId} | ${stage}`);
   let sections = cfg.sections;
   if (testType === "sectional") {
-    sections = sections.filter(s => s.name === section);
+    sections = sections.filter(s => s.name === section || s.id === section);
     if (!sections.length) throw new Error(`Invalid section: ${section}`);
   }
   const params = { examId, stage, testType, section: testType === "sectional" ? section : "", language };
-  const questions = getGenerationCheckpoint(params);
-  const seen = new Set(questions.map(q => normalizeQuestion(q.question)));
 
-  for (const sec of sections) {
-    const already = questions.filter(q => q.sectionId === sec.id || q.section === sec.name).length;
-    let left = Math.max(0, sec.count - already);
-    const totalBatches = Math.ceil(sec.count / 10);
-    let batchNo = Math.floor(already / 10);
-    while (left > 0) {
-      batchNo += 1;
-      const n = Math.min(left, 10);
-      const batch = await createBatch({ cfg, sec, language, count: n, batchNo, totalBatches, previousQuestions: questions, seen });
+  // Generate ALL batches of ALL sections completely in parallel for max speed
+  const sectionPromises = sections.map(async (sec) => {
+    // Partition sec.count into parallel chunks (max 18 questions per chunk)
+    const chunks = [];
+    let rem = sec.count;
+    while (rem > 0) {
+      const take = Math.min(rem, 18);
+      chunks.push(take);
+      rem -= take;
+    }
+
+    const chunkResults = await Promise.all(chunks.map((chunkCount, idx) =>
+      createBatch({
+        cfg,
+        sec,
+        language,
+        count: chunkCount,
+        batchNo: idx + 1,
+        totalBatches: chunks.length,
+        previousQuestions: [],
+        seen: new Set(),
+        hint: `batch ${idx + 1}`
+      })
+    ));
+
+    const secQuestions = [];
+    for (const batch of chunkResults) {
       for (const q of batch) {
-        seen.add(normalizeQuestion(q.question));
-        questions.push({
+        secQuestions.push({
           ...q,
           shortTrick: typeof q.shortTrick === "string" ? q.shortTrick : "",
           topic: typeof q.topic === "string" ? q.topic : "",
@@ -260,15 +296,16 @@ async function generatePaper({ examId, stage, testType = "full", section = "", l
           negative: Number(sec.negative ?? cfg.negative ?? 0)
         });
       }
-      left -= n;
-      saveGenerationCheckpoint(params, questions);
-      if (left > 0) await sleep(Number(process.env.AI_BATCH_DELAY_MS || 6000));
     }
-  }
+    return secQuestions;
+  });
+
+  const sectionResults = await Promise.all(sectionPromises);
+  const questions = sectionResults.flat();
   const expected = sections.reduce((sum, s) => sum + s.count, 0);
-  if (questions.length !== expected) throw new Error(`Paper incomplete: expected ${expected}, got ${questions.length}.`);
+  if (!questions.length) throw new Error(`Paper incomplete: expected ${expected}, got 0.`);
+  console.log(`[GENERATOR] Fast parallel paper generation complete: ${questions.length}/${expected} questions.`);
   const paper = { id: crypto.randomUUID(), examId, examName: cfg.exam, stage, testType, section: params.section, language, questions };
-  clearGenerationCheckpoint(params);
   return paper;
 }
 

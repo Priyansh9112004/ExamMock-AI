@@ -59,7 +59,7 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 app.get('/api/exams', (req, res) => res.json({ ok: true, exams: Object.values(EXAMS) }));
 app.get('/api/question-bank/counts', requireAuth, (req, res) => res.json({ ok: true, counts: db.bankCounts() }));
 
-app.post('/api/start-mock', requireAuth, (req, res) => {
+app.post('/api/start-mock', requireAuth, async (req, res) => {
   try {
     const isSectional = req.body.testType === 'sectional';
     const p = {
@@ -67,9 +67,10 @@ app.post('/api/start-mock', requireAuth, (req, res) => {
       stage: String(req.body.stage || ''),
       testType: isSectional ? 'sectional' : 'full',
       section: isSectional ? String(req.body.section || '') : '',
-      language: String(req.body.language || 'ENGLISH').toUpperCase() === 'HINDI' ? 'HINDI' : 'ENGLISH'
+      language: String(req.body.language || 'ENGLISH').toUpperCase() === 'HINDI' ? 'HINDI' : 'ENGLISH',
+      mode: String(req.body.mode || '')
     };
-    const row = buildInstantPaper(req.auth.sub, p);
+    const row = await buildInstantPaper(req.auth.sub, p);
     const attemptId = db.startAttempt(req.auth.sub, row.id);
     res.json({ ok: true, paper: cleanPaper(row, attemptId) });
   } catch (e) { sendError(res, e); }

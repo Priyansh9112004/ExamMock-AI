@@ -252,15 +252,80 @@ function bankCounts(){
  return db.prepare(`SELECT section_id sectionId,section_name sectionName,language,difficulty,COUNT(*) count
  FROM question_bank WHERE active=1 GROUP BY section_id,section_name,language,difficulty ORDER BY section_name,language,difficulty`).all();
 }
+
+const BANKING_EXAMS = new Set(['ibps-clerk', 'sbi-clerk', 'rbi-assistant', 'ibps-rrb-clerk', 'sbi-po']);
+const SSC_EXAMS = new Set(['ssc-cgl', 'ssc-chsl', 'ssc-cpo', 'ssc-gd']);
+const RAILWAY_EXAMS = new Set(['rrb-ntpc-graduate', 'rrb-ntpc-ug', 'rrb-group-d', 'rrb-alp', 'rrb-technician-3']);
+
 function getBankCandidates(userId, { examId, stage, sectionId, language }) {
   const lang = String(language || 'ENGLISH').toUpperCase();
-  const rows = db.prepare(`
+  
+  // Section aliases (e.g. quant and numerical are identical subjects)
+  let secList = [sectionId];
+  if (['quant', 'numerical', 'math'].includes(sectionId)) {
+    secList = ['quant', 'numerical', 'math'];
+  } else if (['reasoning', 'general-intelligence'].includes(sectionId)) {
+    secList = ['reasoning', 'general-intelligence'];
+  } else if (['english', 'english-comprehension', 'english-language'].includes(sectionId)) {
+    secList = ['english', 'english-comprehension', 'english-language'];
+  }
+  const secPlaceholders = secList.map(() => '?').join(',');
+
+  // Category exam aliases
+  let examList = [examId, ''];
+  if (BANKING_EXAMS.has(examId)) {
+    examList = [...BANKING_EXAMS, ''];
+  } else if (SSC_EXAMS.has(examId)) {
+    examList = [...SSC_EXAMS, ''];
+  } else if (RAILWAY_EXAMS.has(examId)) {
+    examList = [...RAILWAY_EXAMS, ''];
+  }
+  const examPlaceholders = examList.map(() => '?').join(',');
+
+  // 1. Try exact exam & section match first
+  let rows = db.prepare(`
     SELECT qb.*, (usq.question_id IS NOT NULL) AS seen
     FROM question_bank qb
     LEFT JOIN user_seen_questions usq ON usq.user_id=? AND usq.question_id=qb.id
-    WHERE qb.active=1 AND qb.section_id=? AND qb.language=?
-      AND (qb.exam_id='' OR qb.exam_id=?) AND (qb.stage='' OR qb.stage=?)
-    ORDER BY seen ASC, RANDOM()`).all(userId, sectionId, lang, examId, stage);
+    WHERE qb.active=1 AND qb.section_id IN (${secPlaceholders}) AND qb.language=?
+      AND (qb.exam_id='' OR qb.exam_id=?)
+    ORDER BY seen ASC, RANDOM()`).all(userId, ...secList, lang, examId);
+
+  // 2. Supplement from category-compatible exams if count is below 40
+  if (rows.length < 40) {
+    const existingIds = new Set(rows.map(r => r.id));
+    const extra = db.prepare(`
+      SELECT qb.*, (usq.question_id IS NOT NULL) AS seen
+      FROM question_bank qb
+      LEFT JOIN user_seen_questions usq ON usq.user_id=? AND usq.question_id=qb.id
+      WHERE qb.active=1 AND qb.section_id IN (${secPlaceholders}) AND qb.language=?
+        AND qb.exam_id IN (${examPlaceholders})
+      ORDER BY seen ASC, RANDOM() LIMIT 150`).all(userId, ...secList, lang, ...examList);
+    for (const r of extra) {
+      if (!existingIds.has(r.id)) {
+        existingIds.add(r.id);
+        rows.push(r);
+      }
+    }
+  }
+
+  // 3. Fallback across all active question bank items for that section and language if still low
+  if (rows.length < 30) {
+    const existingIds = new Set(rows.map(r => r.id));
+    const extra = db.prepare(`
+      SELECT qb.*, (usq.question_id IS NOT NULL) AS seen
+      FROM question_bank qb
+      LEFT JOIN user_seen_questions usq ON usq.user_id=? AND usq.question_id=qb.id
+      WHERE qb.active=1 AND qb.section_id IN (${secPlaceholders}) AND qb.language=?
+      ORDER BY seen ASC, RANDOM() LIMIT 150`).all(userId, ...secList, lang);
+    for (const r of extra) {
+      if (!existingIds.has(r.id)) {
+        existingIds.add(r.id);
+        rows.push(r);
+      }
+    }
+  }
+
   return rows.map(r => ({
     id: r.id, sectionId: r.section_id, section: r.section_name, topic: r.topic, subtopic: r.subtopic,
     difficulty: String(r.difficulty || 'MEDIUM').toUpperCase(), question: r.question,

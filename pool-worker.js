@@ -143,8 +143,8 @@ async function scan() {
         return;
     }
 
-    if (!process.env.GROQ_API_KEY && !process.env.OPENAI_API_KEY) {
-        console.log("[AUTO-POOL] No AI provider configured. Add GROQ_API_KEY or OPENAI_API_KEY.");
+    if (!process.env.GEMINI_API_KEY && !process.env.GROQ_API_KEY && !process.env.OPENAI_API_KEY) {
+        console.log("[AUTO-POOL] No AI provider configured. Add GEMINI_API_KEY, GROQ_API_KEY or OPENAI_API_KEY.");
         return;
     }
 
@@ -237,7 +237,7 @@ async function scan() {
 
 function start() {
     console.log("[AUTO-POOL] Worker started.");
-    console.log(`[AUTO-POOL] Providers -> Groq: ${process.env.GROQ_API_KEY ? "ON" : "OFF"} | OpenAI fallback: ${process.env.OPENAI_API_KEY ? "ON" : "OFF"}`);
+    console.log(`[AUTO-POOL] Providers -> Gemini: ${process.env.GEMINI_API_KEY ? "ON" : "OFF"} | Groq: ${process.env.GROQ_API_KEY ? "ON" : "OFF"} | OpenAI fallback: ${process.env.OPENAI_API_KEY ? "ON" : "OFF"}`);
     // Clear an old OpenAI-only cooldown from the previous provider architecture.
     setState("pool_cooldown_until", "0");
     schedule(3000);

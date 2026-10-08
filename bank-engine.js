@@ -1,3 +1,4 @@
+require('dotenv').config();
 const crypto = require('crypto');
 const { EXAMS } = require('./exam-config');
 const db = require('./database');
@@ -42,9 +43,47 @@ function choose(rows, count) {
   return null;
 }
 
-function buildInstantPaper(userId, p) {
+const { generatePaper, generateSectionBatch, normalizeQuestion } = require('./generator');
+
+async function buildInstantPaper(userId, p) {
   const cfg = EXAMS[`${p.examId}|${p.stage}`];
   if (!cfg) throw userError('Unsupported exam/stage.');
+
+  // Direct 100% Fresh AI Generation via Gemini
+  if (p.mode === 'ai' || p.forceAi) {
+    try {
+      console.log(`[GEMINI-PIPELINE] Generating 100% fresh paper via Gemini AI for ${p.examId} | ${p.stage} (${p.language})...`);
+      const aiPaper = await generatePaper({
+        examId: p.examId,
+        stage: p.stage,
+        testType: p.testType,
+        section: p.testType === 'sectional' ? p.section : '',
+        language: p.language
+      });
+
+      db.importQuestions(aiPaper.questions.map(q => ({
+        examId: aiPaper.examId,
+        stage: aiPaper.stage,
+        sectionId: q.sectionId,
+        sectionName: q.section || q.sectionId,
+        language: aiPaper.language,
+        topic: q.topic || '',
+        subtopic: q.subtopic || '',
+        difficulty: 'MEDIUM',
+        question: q.question,
+        options: q.options,
+        answer: q.answer,
+        solution: q.solution || '',
+        shortTrick: q.shortTrick || '',
+        source: 'GEMINI_AI'
+      })));
+
+      db.savePaper(aiPaper);
+      return db.paperById(aiPaper.id);
+    } catch (err) {
+      console.warn(`[GEMINI-PIPELINE] Gemini live generation failed (${err.message}), gracefully serving from ready bank...`);
+    }
+  }
 
   let sections = cfg.sections;
   if (p.testType === 'sectional') {
@@ -54,11 +93,68 @@ function buildInstantPaper(userId, p) {
 
   const questions = [];
   const shortages = [];
+
   for (const sec of sections) {
     const lang = sec.englishOnly ? 'ENGLISH' : p.language;
-    const candidates = db.getBankCandidates(userId, { examId: p.examId, stage: p.stage, sectionId: sec.id, language: lang });
-    const picked = choose(candidates, sec.count);
-    if (!picked) { shortages.push(`${sec.name}: need ${sec.count} ${lang} questions`); continue; }
+    let candidates = db.getBankCandidates(userId, { examId: p.examId, stage: p.stage, sectionId: sec.id, language: lang });
+    let picked = (p.mode === 'ai' || p.forceAi) ? null : choose(candidates, sec.count);
+
+    // If shortage or AI mode requested, auto-generate via Gemini pipeline
+    if (!picked || candidates.length < sec.count || p.mode === 'ai' || p.forceAi) {
+      let attempts = 0;
+      while (candidates.length < sec.count && attempts < 3) {
+        attempts++;
+        const chunkSize = Math.min(8, Math.max(3, sec.count - candidates.length));
+        console.log(`[GEMINI-PIPELINE] Generating ${chunkSize} questions for ${cfg.exam} | ${sec.name} (${lang}) via Gemini (round ${attempts})...`);
+        try {
+          const seen = new Set(candidates.map(c => normalizeQuestion(c.question)));
+          const generated = await generateSectionBatch({
+            cfg,
+            sec,
+            language: lang,
+            count: chunkSize,
+            seen
+          });
+
+          if (Array.isArray(generated) && generated.length > 0) {
+            db.importQuestions(generated.map(q => ({
+              examId: cfg.examId,
+              stage: cfg.stage,
+              sectionId: sec.id,
+              sectionName: sec.name,
+              language: lang,
+              topic: q.topic || '',
+              subtopic: q.subtopic || '',
+              difficulty: 'MEDIUM',
+              question: q.question,
+              options: q.options,
+              answer: q.answer,
+              solution: q.solution || '',
+              shortTrick: q.shortTrick || '',
+              source: 'GEMINI_AI'
+            })));
+
+            // Refresh candidates from DB
+            candidates = db.getBankCandidates(userId, { examId: p.examId, stage: p.stage, sectionId: sec.id, language: lang });
+          }
+        } catch (err) {
+          console.error(`[GEMINI-PIPELINE] Generation failed for ${sec.name}:`, err.message);
+          break;
+        }
+      }
+      picked = choose(candidates, sec.count);
+    }
+
+    if (!picked) {
+      if (candidates.length > 0) {
+        // Use all available questions if slightly short
+        picked = candidates.slice(0, sec.count);
+      } else {
+        shortages.push(`${sec.name}: need ${sec.count} ${lang} questions`);
+        continue;
+      }
+    }
+
     questions.push(...picked.map(({ seen, ...q }) => ({ ...q, positive: cfg.positive, negative: cfg.negative })));
   }
 
