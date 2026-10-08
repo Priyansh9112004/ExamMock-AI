@@ -50,7 +50,7 @@ async function buildInstantPaper(userId, p) {
   if (!cfg) throw userError('Unsupported exam/stage.');
 
   // 1. Instant check: If an unseen READY paper exists in the pool, serve it immediately (<5ms)!
-  const readyPaper = db.allocatePaper(userId, p);
+  const readyPaper = await db.allocatePaper(userId, p);
   if (readyPaper) {
     return readyPaper;
   }
@@ -66,7 +66,7 @@ async function buildInstantPaper(userId, p) {
 
   for (const sec of sections) {
     const lang = sec.englishOnly ? 'ENGLISH' : p.language;
-    const candidates = db.getBankCandidates(userId, { examId: p.examId, stage: p.stage, sectionId: sec.id, language: lang });
+    const candidates = await db.getBankCandidates(userId, { examId: p.examId, stage: p.stage, sectionId: sec.id, language: lang });
     let picked = choose(candidates, sec.count);
     if (!picked) {
       if (candidates.length > 0) {
@@ -86,8 +86,8 @@ async function buildInstantPaper(userId, p) {
       testType: p.testType, section: p.testType === 'sectional' ? p.section : '',
       language: p.language, questions
     };
-    db.savePaper(paper);
-    return db.paperById(paper.id);
+    await db.savePaper(paper);
+    return await db.paperById(paper.id);
   }
 
   // 3. Fallback: Live generate via Gemini AI if neither pool nor bank has enough
@@ -100,7 +100,7 @@ async function buildInstantPaper(userId, p) {
     language: p.language
   });
 
-  db.importQuestions(aiPaper.questions.map(q => ({
+  await db.importQuestions(aiPaper.questions.map(q => ({
     examId: aiPaper.examId,
     stage: aiPaper.stage,
     sectionId: q.sectionId,
@@ -117,8 +117,8 @@ async function buildInstantPaper(userId, p) {
     source: 'GEMINI_AI'
   })));
 
-  db.savePaper(aiPaper);
-  return db.paperById(aiPaper.id);
+  await db.savePaper(aiPaper);
+  return await db.paperById(aiPaper.id);
 }
 
 module.exports = { buildInstantPaper };

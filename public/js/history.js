@@ -72,12 +72,18 @@ function actionHtml(a) {
 
     return `
         <div class="historyActions">
-            <button class="btn" onclick="review(${Number(id)})" ${submitted ? "" : "disabled"}>
-                Review Attempt
-            </button>
-            <button class="btn primary" onclick="retry(${Number(id)}, this)">
-                Attempt Again
-            </button>
+            ${submitted ? `
+                <button class="btn" onclick="review(${Number(id)})">
+                    Review Attempt
+                </button>
+                <button class="btn primary" onclick="retry(${Number(id)}, this)">
+                    Attempt Again
+                </button>
+            ` : `
+                <button class="btn primary" style="background:#2563eb;color:#fff" onclick="resumeAttempt(${Number(id)}, this)">
+                    ▶ Resume Test
+                </button>
+            `}
         </div>
     `;
 }
@@ -188,3 +194,35 @@ async function retry(id, button) {
         alert(e.message || "Could not start this paper again.");
     }
 }
+
+async function resumeAttempt(id, button) {
+    const oldText = button ? button.textContent : "";
+
+    try {
+        if (button) {
+            button.disabled = true;
+            button.textContent = "Resuming...";
+        }
+
+        const d = await api("/api/attempt/" + id);
+        const a = d.attempt || d.paper;
+
+        if (!a || !a.questions?.length) {
+            throw Error("The unfinished test could not be loaded.");
+        }
+
+        localStorage.setItem("activePaper", JSON.stringify(a));
+        location.href = "test.htm";
+    } catch (e) {
+        if (button) {
+            button.disabled = false;
+            button.textContent = oldText;
+        }
+        alert(e.message || "Could not resume this test.");
+    }
+}
+
+window.review = review;
+window.retry = retry;
+window.resumeAttempt = resumeAttempt;
+

@@ -40,10 +40,21 @@ function paperDuration(cfg, testType, qCount) {
 
 function cleanPaper(row, attemptId) {
   const cfg = EXAMS[`${row.exam_id}|${row.stage}`];
-  const questions = JSON.parse(row.questions_json);
+  let questions = row.questions || row.questions_json;
+  if (typeof questions === 'string') {
+    try { questions = JSON.parse(questions); } catch { questions = []; }
+  }
+  if (!Array.isArray(questions)) questions = [];
+
   return {
-    attemptId, paperId: row.id, examId: row.exam_id, exam: row.exam_name, stage: row.stage,
-    testType: row.test_type, section: row.section, language: row.language,
+    attemptId: attemptId || row.attempt_id || row.id,
+    paperId: row.paper_id || row.paperId || row.id,
+    examId: row.exam_id,
+    exam: row.exam_name,
+    stage: row.stage,
+    testType: row.test_type,
+    section: row.section,
+    language: row.language,
     duration: paperDuration(cfg, row.test_type, questions.length),
     questions: questions.map(publicQuestion)
   };
@@ -59,7 +70,7 @@ routes(app);
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 app.get('/api/exams', (req, res) => res.json({ ok: true, exams: Object.values(EXAMS) }));
-app.get('/api/question-bank/counts', requireAuth, (req, res) => res.json({ ok: true, counts: db.bankCounts() }));
+app.get('/api/question-bank/counts', requireAuth, async (req, res) => res.json({ ok: true, counts: await db.bankCounts() }));
 
 app.post('/api/start-mock', requireAuth, async (req, res) => {
   try {
@@ -73,8 +84,8 @@ app.post('/api/start-mock', requireAuth, async (req, res) => {
       mode: String(req.body.mode || '')
     };
 
-    // 1. Instant allocation from pre-generated Gemini paper pool (<5ms)
-    let row = db.allocatePaper(req.auth.sub, p);
+    // 1. Instant allocation from pre-generated Gemini paper pool in PostgreSQL (<5ms)
+    let row = await db.allocatePaper(req.auth.sub, p);
     if (row) {
       console.log(`[ALLOCATE] Instant match from ready pool! Served paper ${row.id} for ${p.examId} | ${p.stage}`);
       // Immediately queue background replenishment so pool ALWAYS maintains 2 ready papers!
@@ -85,8 +96,40 @@ app.post('/api/start-mock', requireAuth, async (req, res) => {
       poolWorker.requestReplenish(p);
     }
 
-    const attemptId = db.startAttempt(req.auth.sub, row.id);
+    const attemptId = await db.startAttempt(req.auth.sub, row.id);
     res.json({ ok: true, paper: cleanPaper(row, attemptId) });
+  } catch (e) { sendError(res, e); }
+});
+
+// Real-time progress auto-saver: saves every answer click & draft to Neon PostgreSQL
+app.post('/api/attempt/:id/sync', requireAuth, async (req, res) => {
+  try {
+    const attemptId = Number(req.params.id);
+    if (!Number.isInteger(attemptId)) throw userError('Invalid attempt');
+    await db.saveDraftProgress(req.auth.sub, attemptId, {
+      draftAnswers: req.body.draftAnswers || req.body.answers,
+      currentQuestionIndex: req.body.currentQuestionIndex,
+      totalTimeSeconds: req.body.totalTimeSeconds
+    });
+    res.json({ ok: true, synced: true });
+  } catch (e) { sendError(res, e); }
+});
+
+// Check if user has an ongoing unfinished/unsolved test to resume
+app.get('/api/active-attempt', requireAuth, async (req, res) => {
+  try {
+    const active = await db.getActiveAttempt(req.auth.sub);
+    if (!active) return res.json({ ok: true, active: null });
+    const cfg = EXAMS[`${active.exam_id}|${active.stage}`];
+    res.json({
+      ok: true,
+      active: {
+        ...cleanPaper(active, active.id),
+        draftAnswers: active.draftAnswers || {},
+        currentQuestionIndex: active.current_question_index || 0,
+        totalTimeSeconds: active.total_time_seconds || 0
+      }
+    });
   } catch (e) { sendError(res, e); }
 });
 
@@ -97,7 +140,7 @@ app.post('/api/ai-explain', requireAuth, async (req, res) => {
 
     // Check if already cached in DB for this attempt
     if (attemptId && Number.isInteger(Number(questionIndex))) {
-      const a = db.attemptDetail(req.auth.sub, Number(attemptId));
+      const a = await db.attemptDetail(req.auth.sub, Number(attemptId));
       if (a && a.answers && a.answers[Number(questionIndex)] && a.answers[Number(questionIndex)].aiExplanation) {
         return res.json({ ok: true, explanation: a.answers[Number(questionIndex)].aiExplanation, cached: true });
       }
@@ -114,18 +157,18 @@ app.post('/api/ai-explain', requireAuth, async (req, res) => {
     });
 
     if (attemptId && Number.isInteger(Number(questionIndex))) {
-      db.saveAiExplanation(req.auth.sub, Number(attemptId), Number(questionIndex), explanation);
+      await db.saveAiExplanation(req.auth.sub, Number(attemptId), Number(questionIndex), explanation);
     }
 
     res.json({ ok: true, explanation, cached: false });
   } catch (e) { sendError(res, e); }
 });
 
-app.post('/api/submit-result', requireAuth, (req, res) => {
+app.post('/api/submit-result', requireAuth, async (req, res) => {
   try {
     const attemptId = Number(req.body.attemptId);
     if (!Number.isInteger(attemptId)) throw userError('Invalid attempt');
-    const result = db.submitAttempt(req.auth.sub, attemptId, (questions, a) => {
+    const result = await db.submitAttempt(req.auth.sub, attemptId, (questions, a) => {
       const cfg = EXAMS[`${a.exam_id}|${a.stage}`];
       return gradeAttempt(questions, req.body.responses ?? req.body.answers, {
         cfg, startedAt: a.started_at, durationSec: paperDuration(cfg, a.test_type, questions.length)
@@ -135,30 +178,36 @@ app.post('/api/submit-result', requireAuth, (req, res) => {
   } catch (e) { sendError(res, e); }
 });
 
-app.get('/api/history', requireAuth, (req, res) => res.json({ ok: true, attempts: db.history(req.auth.sub) }));
+app.get('/api/history', requireAuth, async (req, res) => res.json({ ok: true, attempts: await db.history(req.auth.sub) }));
 
-app.get('/api/attempt/:id', requireAuth, (req, res) => {
-  const a = db.attemptDetail(req.auth.sub, Number(req.params.id));
+app.get('/api/attempt/:id', requireAuth, async (req, res) => {
+  const a = await db.attemptDetail(req.auth.sub, Number(req.params.id));
   if (!a) return res.status(404).json({ ok: false, error: 'Attempt not found' });
   if (!a.submitted_at) {
-    const { questions_json, ...rest } = a;
-    return res.json({ ok: true, attempt: { ...rest, questions: a.questions.map(publicQuestion) } });
+    const paper = {
+      ...cleanPaper(a, a.id),
+      draftAnswers: a.draftAnswers || {},
+      currentQuestionIndex: a.current_question_index || 0,
+      totalTimeSeconds: a.total_time_seconds || 0,
+      status: a.status
+    };
+    return res.json({ ok: true, attempt: paper, paper });
   }
   res.json({ ok: true, attempt: a });
 });
 
-app.post('/api/attempt/:id/retry', requireAuth, (req, res) => {
+app.post('/api/attempt/:id/retry', requireAuth, async (req, res) => {
   try {
-    const old = db.attemptDetail(req.auth.sub, Number(req.params.id));
+    const old = await db.attemptDetail(req.auth.sub, Number(req.params.id));
     if (!old) throw userError('Attempt not found', 404);
-    const row = db.paperById(old.paper_id);
+    const row = await db.paperById(old.paper_id);
     if (!row) throw userError('Paper no longer available', 404);
-    const attemptId = db.startAttempt(req.auth.sub, row.id);
+    const attemptId = await db.startAttempt(req.auth.sub, row.id);
     res.json({ ok: true, paper: cleanPaper(row, attemptId) });
   } catch (e) { sendError(res, e); }
 });
 
-app.get('/api/performance', requireAuth, (req, res) => res.json({ ok: true, stats: db.stats(req.auth.sub) }));
+app.get('/api/performance', requireAuth, async (req, res) => res.json({ ok: true, stats: await db.stats(req.auth.sub) }));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.htm')));
 
 app.use((err, req, res, next) => {

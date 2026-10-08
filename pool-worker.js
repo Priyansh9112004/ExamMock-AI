@@ -86,18 +86,19 @@ function schedule(ms) {
 }
 
 async function generateAndSave(p) {
-  console.log(`[AUTO-POOL] GENERATING -> ${label(p)} via Gemini (Current ready: ${readyCount(p)}/${POOL_TARGET})...`);
+  const currentCount = await readyCount(p);
+  console.log(`[AUTO-POOL] GENERATING -> ${label(p)} via Gemini (Current ready: ${currentCount}/${POOL_TARGET})...`);
 
   const paper = await generatePaper(p);
   if (!paper || !paper.id || !Array.isArray(paper.questions) || !paper.questions.length) {
     throw new Error("Generator returned an empty or invalid paper.");
   }
 
-  savePaper(paper);
+  await savePaper(paper);
 
   // Import into master question_bank as well
   try {
-    importQuestions(paper.questions.map(q => ({
+    await importQuestions(paper.questions.map(q => ({
       examId: paper.examId,
       stage: paper.stage,
       sectionId: q.sectionId,
@@ -117,16 +118,17 @@ async function generateAndSave(p) {
     console.warn('[AUTO-POOL] Question import warning:', err.message);
   }
 
-  console.log(`[AUTO-POOL] READY -> Paper ${paper.id} successfully saved to DB! (Now ready: ${readyCount(p)}/${POOL_TARGET})`);
+  const newCount = await readyCount(p);
+  console.log(`[AUTO-POOL] READY -> Paper ${paper.id} successfully saved to DB! (Now ready: ${newCount}/${POOL_TARGET})`);
   return paper;
 }
 
-function saveCooldown(err) {
+async function saveCooldown(err) {
   const requested = parseRetryMs(err) || (60 * 1000);
   const wait = Math.min(requested + 5000, 15 * 60 * 1000);
   const until = Date.now() + wait;
 
-  setState("pool_cooldown_until", until);
+  await setState("pool_cooldown_until", until);
   console.log(`[AUTO-POOL] AI provider rate limited. Retrying pool scan in ${Math.ceil(wait / 1000)}s.`);
   schedule(wait);
 }
@@ -144,7 +146,7 @@ async function scan() {
     return;
   }
 
-  const cooldownUntil = Number(getState("pool_cooldown_until") || 0);
+  const cooldownUntil = Number((await getState("pool_cooldown_until")) || 0);
   if (cooldownUntil > Date.now()) {
     const remaining = cooldownUntil - Date.now();
     schedule(remaining);
@@ -157,7 +159,7 @@ async function scan() {
     // 1. Process any urgent replenishment requests first
     while (urgentQueue.length > 0) {
       const p = urgentQueue.shift();
-      const count = readyCount(p);
+      const count = await readyCount(p);
       if (count < POOL_TARGET) {
         console.log(`[AUTO-POOL] URGENT -> ${label(p)} | ${count}/${POOL_TARGET}`);
         try {
@@ -165,7 +167,7 @@ async function scan() {
           await sleep(3000);
         } catch (err) {
           if (isRateLimit(err)) {
-            saveCooldown(err);
+            await saveCooldown(err);
             return;
           }
           console.error(`[AUTO-POOL] Urgent generation failed for ${label(p)}:`, err?.message || err);
@@ -176,7 +178,7 @@ async function scan() {
 
     // 2. Process priority pools (ensure 2 ready papers for top exams)
     for (const p of PRIORITY_POOLS) {
-      const count = readyCount(p);
+      const count = await readyCount(p);
       if (count < POOL_TARGET) {
         console.log(`[AUTO-POOL] PRIORITY DEFICIT -> ${label(p)} | ${count}/${POOL_TARGET}`);
         try {
@@ -184,7 +186,7 @@ async function scan() {
           await sleep(4000);
         } catch (err) {
           if (isRateLimit(err)) {
-            saveCooldown(err);
+            await saveCooldown(err);
             return;
           }
           console.error(`[AUTO-POOL] Priority generation failed for ${label(p)}:`, err?.message || err);
@@ -197,7 +199,7 @@ async function scan() {
     // 3. Process general pool list gradually (target: POOL_TARGET)
     const list = pools();
     for (const p of list) {
-      const count = readyCount(p);
+      const count = await readyCount(p);
       if (count >= POOL_TARGET) continue;
 
       try {
@@ -206,7 +208,7 @@ async function scan() {
         await sleep(5000);
       } catch (err) {
         if (isRateLimit(err)) {
-          saveCooldown(err);
+          await saveCooldown(err);
           return;
         }
         console.error(`[AUTO-POOL] Generation failed for ${label(p)}:`, err?.message || err);
@@ -225,7 +227,7 @@ async function scan() {
 function start() {
   console.log(`[AUTO-POOL] Auto-replenish pool worker started. Maintaining at least ${POOL_TARGET} ready papers per exam.`);
   console.log(`[AUTO-POOL] Providers -> Gemini: ${process.env.GEMINI_API_KEY ? "ON" : "OFF"}`);
-  setState("pool_cooldown_until", "0");
+  setState("pool_cooldown_until", "0").catch(() => {});
   schedule(2000);
 }
 

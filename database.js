@@ -1,3 +1,9 @@
+require('dotenv').config();
+if (process.env.DATABASE_URL) {
+  module.exports = require('./db-postgres');
+  return;
+}
+
 const Database=require('better-sqlite3'); const path=require('path'); const crypto=require('crypto');
 const fs = require('fs');
 const { userError } = require('./errors');

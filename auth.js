@@ -60,12 +60,12 @@ function routes(app) {
       if (!validEmail(email)) throw userError('Enter a valid email address');
       if (password.length < 8) throw userError('Password must be at least 8 characters');
       if (Buffer.byteLength(password) > 72) throw userError('Password is too long (max 72 bytes)');
-      if (getUserByIdentifier(userId) || getUserByIdentifier(email)) {
+      if ((await getUserByIdentifier(userId)) || (await getUserByIdentifier(email))) {
         throw userError('User ID or email is already registered');
       }
 
       const passwordHash = await bcrypt.hash(password, 12);
-      const user = createUser({ name, userId, email, passwordHash });
+      const user = await createUser({ name, userId, email, passwordHash });
       res.json({ ok: true, token: token(user), user });
     } catch (e) { sendAuthError(res, e); }
   });
@@ -73,16 +73,16 @@ function routes(app) {
   app.post('/api/auth/login', loginLimiter, async (req, res) => {
     try {
       const identifier = String(req.body.identifier || '').trim().slice(0, 254);
-      const u = identifier ? getUserByIdentifier(identifier) : null;
+      const u = identifier ? await getUserByIdentifier(identifier) : null;
       const ok = await bcrypt.compare(String(req.body.password || ''), u ? u.password_hash : DUMMY_HASH);
       if (!u || !ok) throw userError('Invalid User ID/email or password', 401);
-      const user = getUserById(u.id);
+      const user = await getUserById(u.id);
       res.json({ ok: true, token: token(user), user });
     } catch (e) { sendAuthError(res, e); }
   });
 
-  app.get('/api/auth/me', requireAuth, (req, res) => {
-    const user = getUserById(req.auth.sub);
+  app.get('/api/auth/me', requireAuth, async (req, res) => {
+    const user = await getUserById(req.auth.sub);
     if (!user) return res.status(401).json({ ok: false, error: 'Account not found' });
     res.json({ ok: true, user });
   });

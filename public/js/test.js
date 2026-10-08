@@ -9,14 +9,45 @@ if (!paper || !paper.questions?.length) {
 }
 
 const qs = paper.questions;
-let i = 0;
-let answers = {};
+let i = Number(paper.currentQuestionIndex || 0);
+let answers = paper.draftAnswers || {};
 let status = {};
 let visited = {};
+
+// Pre-populate visited and answered status when resuming an unfinished test
+Object.keys(answers).forEach(k => {
+    visited[k] = true;
+    if (answers[k] !== undefined && answers[k] !== null && answers[k] !== "") {
+        status[k] = "answered";
+    }
+});
+
 let started = Date.now();
-let left = duration();
+let left = duration() - (Number(paper.totalTimeSeconds) || 0);
+if (left <= 60) left = duration();
 let submitting = false;
 let timerHandle = null;
+
+let syncTimer = null;
+function syncCloudProgress() {
+    if (syncTimer) clearTimeout(syncTimer);
+    syncTimer = setTimeout(async () => {
+        try {
+            if (paper && paper.attemptId) {
+                await api("/api/attempt/" + paper.attemptId + "/sync", {
+                    method: "POST",
+                    body: JSON.stringify({
+                        draftAnswers: answers,
+                        currentQuestionIndex: i,
+                        totalTimeSeconds: duration() - Math.max(0, left)
+                    })
+                });
+            }
+        } catch (e) {
+            // Background sync silent fail / retry
+        }
+    }, 400);
+}
 
 function duration() { return Number(paper.duration) || 3600; }
 
@@ -30,7 +61,7 @@ function sectionName(q) {
 }
 
 function currentState(n) {
-    const hasAnswer = answers[n] !== undefined;
+    const hasAnswer = answers[n] !== undefined && answers[n] !== null && answers[n] !== "";
     const marked = status[n] === "review";
 
     if (!visited[n]) return "notVisited";
@@ -121,19 +152,22 @@ function render() {
 
     question.textContent = q.question;
 
-    options.innerHTML = q.options.map((option, n) => `
-        <label class="option ${answers[i] === n ? "selected" : ""}">
+    options.innerHTML = q.options.map((option, n) => {
+        const isChecked = answers[i] !== undefined && answers[i] !== null && String(answers[i]) === String(n);
+        return `
+        <label class="option ${isChecked ? "selected" : ""}">
             <input
                 type="radio"
                 name="o"
                 value="${n}"
-                ${answers[i] === n ? "checked" : ""}
+                ${isChecked ? "checked" : ""}
                 onchange="selectAnswer(${n})"
             >
             <b>${String.fromCharCode(65 + n)}.</b>
             <span>${esc(option)}</span>
         </label>
-    `).join("");
+        `;
+    }).join("");
 
     prevBtn.disabled = i === 0;
 
@@ -144,18 +178,21 @@ function render() {
 function selectAnswer(n) {
     answers[i] = n;
     render();
+    syncCloudProgress();
 }
 
 function go(n) {
     if (n < 0 || n >= qs.length) return;
     i = n;
     render();
+    syncCloudProgress();
 }
 
 function prev() {
     if (i > 0) {
         i--;
         render();
+        syncCloudProgress();
     }
 }
 
@@ -166,6 +203,7 @@ function moveNext() {
     } else {
         render();
     }
+    syncCloudProgress();
 }
 
 function saveNext() {
@@ -191,6 +229,7 @@ function clearAns() {
     }
 
     render();
+    syncCloudProgress();
 }
 
 function jumpSection(s) {
