@@ -262,9 +262,9 @@ async function generatePaper({ examId, stage, testType = "full", section = "", l
   }
   const params = { examId, stage, testType, section: testType === "sectional" ? section : "", language };
 
-  // Generate ALL batches of ALL sections completely in parallel for max speed
-  const sectionPromises = sections.map(async (sec) => {
-    // Partition sec.count into parallel chunks (max 8 questions per chunk for full detailed solutions)
+  // Generate batches with brief spacing so Gemini free tier (15 RPM) doesn't get flooded with 429s
+  const questions = [];
+  for (const sec of sections) {
     const chunks = [];
     let rem = sec.count;
     while (rem > 0) {
@@ -273,24 +273,21 @@ async function generatePaper({ examId, stage, testType = "full", section = "", l
       rem -= take;
     }
 
-    const chunkResults = await Promise.all(chunks.map((chunkCount, idx) =>
-      createBatch({
+    for (let idx = 0; idx < chunks.length; idx++) {
+      const batch = await createBatch({
         cfg,
         sec,
         language,
-        count: chunkCount,
+        count: chunks[idx],
         batchNo: idx + 1,
         totalBatches: chunks.length,
         previousQuestions: [],
         seen: new Set(),
         hint: `batch ${idx + 1}`
-      })
-    ));
+      });
 
-    const secQuestions = [];
-    for (const batch of chunkResults) {
       for (const q of batch) {
-        secQuestions.push({
+        questions.push({
           ...q,
           shortTrick: typeof q.shortTrick === "string" ? q.shortTrick : "",
           topic: typeof q.topic === "string" ? q.topic : "",
@@ -300,12 +297,13 @@ async function generatePaper({ examId, stage, testType = "full", section = "", l
           negative: Number(sec.negative ?? cfg.negative ?? 0)
         });
       }
-    }
-    return secQuestions;
-  });
 
-  const sectionResults = await Promise.all(sectionPromises);
-  const questions = sectionResults.flat();
+      // Small pause between batches to protect API quota
+      if (idx < chunks.length - 1 || sec !== sections[sections.length - 1]) {
+        await new Promise(r => setTimeout(r, 1200));
+      }
+    }
+  }
   const expected = sections.reduce((sum, s) => sum + s.count, 0);
   if (!questions.length) throw new Error(`Paper incomplete: expected ${expected}, got 0.`);
   console.log(`[GENERATOR] Fast parallel paper generation complete: ${questions.length}/${expected} questions.`);
