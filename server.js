@@ -9,6 +9,8 @@ const db = require('./database');
 const { buildInstantPaper } = require('./bank-engine');
 const { gradeAttempt } = require('./grading');
 const { userError } = require('./errors');
+const poolWorker = require('./pool-worker');
+const { explainQuestionWithAI } = require('./generator');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -70,9 +72,52 @@ app.post('/api/start-mock', requireAuth, async (req, res) => {
       language: String(req.body.language || 'ENGLISH').toUpperCase() === 'HINDI' ? 'HINDI' : 'ENGLISH',
       mode: String(req.body.mode || '')
     };
-    const row = await buildInstantPaper(req.auth.sub, p);
+
+    // 1. Instant allocation from pre-generated Gemini paper pool (<5ms)
+    let row = db.allocatePaper(req.auth.sub, p);
+    if (row) {
+      console.log(`[ALLOCATE] Instant match from ready pool! Served paper ${row.id} for ${p.examId} | ${p.stage}`);
+      // Immediately queue background replenishment so pool ALWAYS maintains 2 ready papers!
+      poolWorker.requestReplenish(p);
+    } else {
+      console.log(`[ALLOCATE] Pool empty for ${p.examId} | ${p.stage}, assembling instant paper...`);
+      row = await buildInstantPaper(req.auth.sub, p);
+      poolWorker.requestReplenish(p);
+    }
+
     const attemptId = db.startAttempt(req.auth.sub, row.id);
     res.json({ ok: true, paper: cleanPaper(row, attemptId) });
+  } catch (e) { sendError(res, e); }
+});
+
+app.post('/api/ai-explain', requireAuth, async (req, res) => {
+  try {
+    const { attemptId, questionIndex, question, options, selectedAnswer, correctAnswer, language, topic, section } = req.body;
+    if (!question || !Array.isArray(options)) throw userError('Invalid question payload');
+
+    // Check if already cached in DB for this attempt
+    if (attemptId && Number.isInteger(Number(questionIndex))) {
+      const a = db.attemptDetail(req.auth.sub, Number(attemptId));
+      if (a && a.answers && a.answers[Number(questionIndex)] && a.answers[Number(questionIndex)].aiExplanation) {
+        return res.json({ ok: true, explanation: a.answers[Number(questionIndex)].aiExplanation, cached: true });
+      }
+    }
+
+    const explanation = await explainQuestionWithAI({
+      question,
+      options,
+      selectedAnswer,
+      correctAnswer,
+      language: language || 'ENGLISH',
+      topic: topic || '',
+      section: section || ''
+    });
+
+    if (attemptId && Number.isInteger(Number(questionIndex))) {
+      db.saveAiExplanation(req.auth.sub, Number(attemptId), Number(questionIndex), explanation);
+    }
+
+    res.json({ ok: true, explanation, cached: false });
   } catch (e) { sendError(res, e); }
 });
 
@@ -123,7 +168,10 @@ app.use((err, req, res, next) => {
   res.status(500).json({ ok: false, error: 'Server error' });
 });
 
-const server = app.listen(PORT, () => console.log(`ExamMock AI running on http://localhost:${PORT}`));
+const server = app.listen(PORT, () => {
+  console.log(`ExamMock AI running on http://localhost:${PORT}`);
+  poolWorker.start();
+});
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => server.close(() => { db.db.close(); process.exit(0); }));
 }

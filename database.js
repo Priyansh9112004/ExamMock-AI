@@ -331,8 +331,21 @@ function getBankCandidates(userId, { examId, stage, sectionId, language }) {
     difficulty: String(r.difficulty || 'MEDIUM').toUpperCase(), question: r.question,
     options: JSON.parse(r.options_json), answer: r.answer, solution: r.solution, shortTrick: r.short_trick,
     groupId: r.group_id || '', groupType: r.group_type || '', sharedStem: r.shared_stem || '',
-    groupOrder: Number(r.group_order || 0), seen: !!r.seen
   }));
 }
 
-module.exports={db,createUser,getUserByIdentifier,getUserById,savePaper,readyCount,allocatePaper,paperById,startAttempt,submitAttempt,history,attemptDetail,stats,getState,setState,getGenerationCheckpoint,saveGenerationCheckpoint,clearGenerationCheckpoint,importQuestions,bankCounts,getBankCandidates};
+function saveAiExplanation(userId, attemptId, questionIndex, explanation) {
+  const row = db.prepare('SELECT answers_json FROM attempts WHERE id=? AND user_id=?').get(attemptId, userId);
+  if (!row || !row.answers_json) return;
+  try {
+    const answers = JSON.parse(row.answers_json);
+    if (answers && answers[questionIndex]) {
+      answers[questionIndex].aiExplanation = explanation;
+      db.prepare('UPDATE attempts SET answers_json=? WHERE id=? AND user_id=?').run(JSON.stringify(answers), attemptId, userId);
+    }
+  } catch (err) {
+    console.error('[DB] Failed to save AI explanation:', err);
+  }
+}
+
+module.exports={db,createUser,getUserByIdentifier,getUserById,savePaper,readyCount,allocatePaper,paperById,startAttempt,submitAttempt,history,attemptDetail,stats,getState,setState,getGenerationCheckpoint,saveGenerationCheckpoint,clearGenerationCheckpoint,importQuestions,bankCounts,getBankCandidates,saveAiExplanation};

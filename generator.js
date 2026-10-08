@@ -159,7 +159,7 @@ function validateQuestion(q, optionCount = 4) {
 function buildPrompt({ cfg, sec, language, count, optionCount, forbidden, hint }) {
   const opts = Array(optionCount).fill('"option text"').join(",");
   return `
-You are creating a high-quality mock test for an Indian competitive examination.
+You are a senior exam paper setter creating an authentic, high-quality mock test for an Indian competitive examination.
 Exam: ${cfg.exam}
 Stage: ${cfg.stage}
 Section: ${sec.name}
@@ -168,12 +168,16 @@ ${langRule(sec, language)}
 ${hint ? `Focus this batch on these topics: ${hint}.` : ""}
 
 Requirements:
-1. Match realistic ${cfg.exam} ${cfg.stage} difficulty and style.
+1. Match realistic ${cfg.exam} ${cfg.stage} difficulty and latest exam pattern.
 2. Create fresh original questions; do not copy previous-year questions verbatim.
 3. Every question has exactly ${optionCount} plausible, distinct options and exactly one correct option.
 4. "answer" is the integer index (0 to ${optionCount - 1}) of the correct option.
-5. Keep solutions crisp and direct (1-2 sentences).
-6. shortTrick: brief faster exam trick if applicable, else "".
+5. In-depth Detailed Solution (MANDATORY: DO NOT write just 1-2 lines!):
+   Provide an exhaustive, step-by-step master solution (at least 3-5 structured paragraphs or sections). It MUST contain:
+   - [Step-by-Step Solution]: Complete formula, derivation, grammatical breakdown, or calculation steps.
+   - [Why Correct Option is Right]: Clear rationale proving why the correct option is true.
+   - [Why Other Options are Incorrect / Distractor Analysis]: Explicitly explain why each incorrect option is wrong, and explain the common traps, calculation errors, or confusion candidates face.
+6. shortTrick: A fast shortcut formula, Vedic math trick, option elimination method, or 30-second technique for competitive exams.
 7. Return ONLY valid JSON, no markdown.
 
 Return this exact structure:
@@ -260,11 +264,11 @@ async function generatePaper({ examId, stage, testType = "full", section = "", l
 
   // Generate ALL batches of ALL sections completely in parallel for max speed
   const sectionPromises = sections.map(async (sec) => {
-    // Partition sec.count into parallel chunks (max 18 questions per chunk)
+    // Partition sec.count into parallel chunks (max 8 questions per chunk for full detailed solutions)
     const chunks = [];
     let rem = sec.count;
     while (rem > 0) {
-      const take = Math.min(rem, 18);
+      const take = Math.min(rem, 8);
       chunks.push(take);
       rem -= take;
     }
@@ -309,4 +313,46 @@ async function generatePaper({ examId, stage, testType = "full", section = "", l
   return paper;
 }
 
-module.exports = { generatePaper, generateSectionBatch, normalizeQuestion };
+async function explainQuestionWithAI({ question, options, selectedAnswer, correctAnswer, language = "ENGLISH", topic = "", section = "" }) {
+  const chosenIndex = (selectedAnswer !== null && selectedAnswer !== undefined && !Number.isNaN(Number(selectedAnswer))) ? Number(selectedAnswer) : null;
+  const correctIndex = Number(correctAnswer);
+
+  const chosenText = chosenIndex !== null && options[chosenIndex] !== undefined
+    ? `Option (${String.fromCharCode(65 + chosenIndex)}): ${options[chosenIndex]}`
+    : "Not attempted / left blank";
+  const correctText = `Option (${String.fromCharCode(65 + correctIndex)}): ${options[correctIndex] || ''}`;
+  const optionsListing = (options || []).map((opt, idx) => `  ${String.fromCharCode(65 + idx)}) ${opt}`).join('\n');
+
+  const prompt = `
+You are an expert master tutor for Indian competitive examinations (SSC, Banking, Railways, Teaching).
+A candidate just attempted this question in a mock test and needs an exhaustive diagnostic breakdown of their answer.
+
+Section: ${section || 'General'}
+Topic: ${topic || 'General'}
+Exam Language: ${language}
+
+Question:
+${question}
+
+Options:
+${optionsListing}
+
+Candidate's Answer: ${chosenText}
+Correct Answer: ${correctText}
+
+Provide an exhaustive, high-yield diagnostic explanation in clean JSON format:
+{
+  "mistakeAnalysis": "Detailed diagnosis of why the candidate's chosen option is wrong (or why candidates struggle with this if unattempted). Pinpoint the exact conceptual trap, false assumption, or calculation pitfall.",
+  "coreConcept": "Clear, comprehensive explanation of the fundamental concept, rule, or theorem tested in this question.",
+  "stepByStep": "Complete, step-by-step master derivation showing how to solve the problem systematically.",
+  "shortcut": "Topper's secret shortcut: speed technique, Vedic math trick, or option elimination rule to solve in under 30 seconds."
+}
+
+Return ONLY valid JSON, no markdown.
+`.trim();
+
+  const ai = await generateText(prompt, { temperature: 0.2 });
+  return cleanJson(ai.text);
+}
+
+module.exports = { generatePaper, generateSectionBatch, normalizeQuestion, explainQuestionWithAI, generateText };

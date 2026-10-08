@@ -1,246 +1,232 @@
+require('dotenv').config();
 const { EXAMS } = require("./exam-config");
-const { readyCount, savePaper, getState, setState } = require("./database");
+const { readyCount, savePaper, getState, setState, importQuestions } = require("./database");
 const { generatePaper } = require("./generator");
+const { parseRetryMs, isRateLimit } = require("./retry-utils");
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 let running = false;
 let timer = null;
 
-// User practice priority: prepare these two full mocks first, in this exact order.
+const POOL_TARGET = Math.max(2, Number(process.env.POOL_TARGET || 2));
+
+// Top exams priority order for automatic 2-paper buffer
 const PRIORITY_POOLS = [
-    {
-        examId: "ibps-clerk",
-        stage: "Prelims",
-        testType: "full",
-        section: "",
-        language: "ENGLISH"
-    },
-    {
-        examId: "ssc-cgl",
-        stage: "Tier-I",
-        testType: "full",
-        section: "",
-        language: "ENGLISH"
-    }
+  { examId: "ibps-clerk", stage: "Prelims", testType: "full", section: "", language: "ENGLISH" },
+  { examId: "ssc-cgl", stage: "Tier-I", testType: "full", section: "", language: "ENGLISH" },
+  { examId: "sbi-po", stage: "Prelims", testType: "full", section: "", language: "ENGLISH" },
+  { examId: "sbi-clerk", stage: "Prelims", testType: "full", section: "", language: "ENGLISH" },
+  { examId: "rrb-ntpc-graduate", stage: "CBT-1", testType: "full", section: "", language: "ENGLISH" },
+  { examId: "ibps-clerk", stage: "Prelims", testType: "full", section: "", language: "HINDI" },
+  { examId: "ssc-cgl", stage: "Tier-I", testType: "full", section: "", language: "HINDI" },
+  { examId: "ssc-chsl", stage: "Tier-I", testType: "full", section: "", language: "ENGLISH" },
+  { examId: "rrb-alp", stage: "CBT-1", testType: "full", section: "", language: "ENGLISH" },
+  { examId: "ctet", stage: "Paper-I", testType: "full", section: "", language: "ENGLISH" }
 ];
 
 function pools() {
-    const out = [];
-
-    for (const cfg of Object.values(EXAMS)) {
-        for (const language of ["ENGLISH", "HINDI"]) {
-            out.push({
-                examId: cfg.examId,
-                stage: cfg.stage,
-                testType: "full",
-                section: "",
-                language
-            });
-
-            for (const section of cfg.sections) {
-                out.push({
-                    examId: cfg.examId,
-                    stage: cfg.stage,
-                    testType: "sectional",
-                    section: section.name,
-                    language
-                });
-            }
-        }
+  const out = [];
+  for (const cfg of Object.values(EXAMS)) {
+    for (const language of ["ENGLISH", "HINDI"]) {
+      out.push({
+        examId: cfg.examId,
+        stage: cfg.stage,
+        testType: "full",
+        section: "",
+        language
+      });
+      for (const section of cfg.sections) {
+        out.push({
+          examId: cfg.examId,
+          stage: cfg.stage,
+          testType: "sectional",
+          section: section.name,
+          language
+        });
+      }
     }
-
-    return out;
+  }
+  return out;
 }
 
 function label(p) {
-    return `${p.examId} | ${p.stage} | ${p.testType} | ${p.section || "FULL"} | ${p.language}`;
+  return `${p.examId} | ${p.stage} | ${p.testType} | ${p.section || "FULL"} | ${p.language}`;
 }
 
-function headerValue(headers, name) {
-    if (!headers) return null;
-    if (typeof headers.get === "function") return headers.get(name);
-    return headers[name] ?? headers[name.toLowerCase()] ?? null;
-}
+const urgentQueue = [];
 
-function retryMs(err) {
-    const h = err?.headers;
+function requestReplenish(p) {
+  if (!p || !p.examId || !p.stage) return;
+  const target = {
+    examId: p.examId,
+    stage: p.stage,
+    testType: p.testType || "full",
+    section: p.section || "",
+    language: String(p.language || "ENGLISH").toUpperCase() === "HINDI" ? "HINDI" : "ENGLISH"
+  };
 
-    const ms = Number(headerValue(h, "retry-after-ms"));
-    if (Number.isFinite(ms) && ms > 0) return ms;
+  const key = label(target);
+  if (!urgentQueue.some(x => label(x) === key)) {
+    console.log(`[AUTO-POOL] Replenish request queued for: ${key} (Target: ${POOL_TARGET} papers)`);
+    urgentQueue.unshift(target);
+  }
 
-    const sec = Number(headerValue(h, "retry-after"));
-    if (Number.isFinite(sec) && sec > 0) return sec * 1000;
-
-    const message = String(err?.message || "");
-    const m = message.match(
-        /try again in\s+(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)s)?/i
-    );
-
-    if (m) {
-        return (
-            (Number(m[1]) || 0) * 3600 +
-            (Number(m[2]) || 0) * 60 +
-            (Number(m[3]) || 0)
-        ) * 1000;
-    }
-
-    return 60 * 60 * 1000;
-}
-
-function isRateLimit(err) {
-    return (
-        Number(err?.status) === 429 ||
-        String(err?.code || "").toLowerCase() === "rate_limit_exceeded" ||
-        /rate limit|too many requests/i.test(String(err?.message || ""))
-    );
+  if (!running) {
+    schedule(300);
+  }
 }
 
 function schedule(ms) {
-    if (timer) clearTimeout(timer);
-
-    timer = setTimeout(() => {
-        scan().catch(err => console.error("[AUTO-POOL] Scan error:", err));
-    }, Math.max(1000, Number(ms) || 1000));
-
-    timer.unref?.();
+  if (timer) clearTimeout(timer);
+  timer = setTimeout(() => {
+    scan().catch(err => console.error("[AUTO-POOL] Scan error:", err));
+  }, Math.max(500, Number(ms) || 500));
+  timer.unref?.();
 }
 
 async function generateAndSave(p) {
-    console.log(`[AUTO-POOL] GENERATING -> ${label(p)}`);
+  console.log(`[AUTO-POOL] GENERATING -> ${label(p)} via Gemini (Current ready: ${readyCount(p)}/${POOL_TARGET})...`);
 
-    const paper = await generatePaper(p);
+  const paper = await generatePaper(p);
+  if (!paper || !paper.id || !Array.isArray(paper.questions) || !paper.questions.length) {
+    throw new Error("Generator returned an empty or invalid paper.");
+  }
 
-    if (!paper || !paper.id) {
-        throw new Error("Generator returned an invalid paper.");
-    }
+  savePaper(paper);
 
-    savePaper(paper);
+  // Import into master question_bank as well
+  try {
+    importQuestions(paper.questions.map(q => ({
+      examId: paper.examId,
+      stage: paper.stage,
+      sectionId: q.sectionId,
+      sectionName: q.section || q.sectionId,
+      language: paper.language,
+      topic: q.topic || '',
+      subtopic: q.subtopic || '',
+      difficulty: 'MEDIUM',
+      question: q.question,
+      options: q.options,
+      answer: q.answer,
+      solution: q.solution || '',
+      shortTrick: q.shortTrick || '',
+      source: 'GEMINI_AI'
+    })));
+  } catch (err) {
+    console.warn('[AUTO-POOL] Question import warning:', err.message);
+  }
 
-    console.log(`[AUTO-POOL] READY -> ${paper.id}`);
-    return paper;
+  console.log(`[AUTO-POOL] READY -> Paper ${paper.id} successfully saved to DB! (Now ready: ${readyCount(p)}/${POOL_TARGET})`);
+  return paper;
 }
 
 function saveCooldown(err) {
-    const requested = retryMs(err) + 5000;
-    const wait = Math.min(requested, 15 * 60 * 1000);
-    const until = Date.now() + wait;
+  const requested = parseRetryMs(err) || (60 * 1000);
+  const wait = Math.min(requested + 5000, 15 * 60 * 1000);
+  const until = Date.now() + wait;
 
-    setState("pool_cooldown_until", until);
-
-    console.log(
-        `[AUTO-POOL] All available providers are rate-limited/unavailable. Retrying in ${Math.ceil(wait / 60000)} min.`
-    );
-
-    schedule(wait);
+  setState("pool_cooldown_until", until);
+  console.log(`[AUTO-POOL] AI provider rate limited. Retrying pool scan in ${Math.ceil(wait / 1000)}s.`);
+  schedule(wait);
 }
 
 async function scan() {
-    if (running) return;
+  if (running) return;
 
-    if (process.env.POOL_WORKER_ENABLED === "false") {
-        console.log("[AUTO-POOL] Worker disabled.");
-        return;
-    }
+  if (process.env.POOL_WORKER_ENABLED === "false") {
+    console.log("[AUTO-POOL] Worker disabled by environment.");
+    return;
+  }
 
-    if (!process.env.GEMINI_API_KEY && !process.env.GROQ_API_KEY && !process.env.OPENAI_API_KEY) {
-        console.log("[AUTO-POOL] No AI provider configured. Add GEMINI_API_KEY, GROQ_API_KEY or OPENAI_API_KEY.");
-        return;
-    }
+  if (!process.env.GEMINI_API_KEY && !process.env.GROQ_API_KEY && !process.env.OPENAI_API_KEY) {
+    console.log("[AUTO-POOL] No AI provider configured. Set GEMINI_API_KEY in .env.");
+    return;
+  }
 
-    running = true;
+  const cooldownUntil = Number(getState("pool_cooldown_until") || 0);
+  if (cooldownUntil > Date.now()) {
+    const remaining = cooldownUntil - Date.now();
+    schedule(remaining);
+    return;
+  }
 
-    try {
-        // STEP 1: prepare the user's two immediate practice papers first.
-        // Do not start general inventory until BOTH are READY.
-        for (const priorityPool of PRIORITY_POOLS) {
-            const priorityCount = readyCount(priorityPool);
+  running = true;
 
-            console.log(
-                `[AUTO-POOL] PRIORITY -> ${label(priorityPool)} | ${priorityCount}/1`
-            );
-
-            if (priorityCount < 1) {
-                try {
-                    await generateAndSave(priorityPool);
-                    console.log(`[AUTO-POOL] PRIORITY READY -> ${label(priorityPool)}`);
-                } catch (err) {
-                    if (isRateLimit(err)) {
-                        saveCooldown(err);
-                        return;
-                    }
-
-                    console.error(
-                        `[AUTO-POOL] Priority generation failed for ${label(priorityPool)}:`,
-                        err?.message || err
-                    );
-
-                    schedule(5 * 60 * 1000);
-                    return;
-                }
-            }
+  try {
+    // 1. Process any urgent replenishment requests first
+    while (urgentQueue.length > 0) {
+      const p = urgentQueue.shift();
+      const count = readyCount(p);
+      if (count < POOL_TARGET) {
+        console.log(`[AUTO-POOL] URGENT -> ${label(p)} | ${count}/${POOL_TARGET}`);
+        try {
+          await generateAndSave(p);
+          await sleep(3000);
+        } catch (err) {
+          if (isRateLimit(err)) {
+            saveCooldown(err);
+            return;
+          }
+          console.error(`[AUTO-POOL] Urgent generation failed for ${label(p)}:`, err?.message || err);
+          break;
         }
-
-        console.log("[AUTO-POOL] Both immediate practice priorities are READY. Continuing normal pool refill.");
-
-        // STEP 2: refill all pools gradually.
-        const target = Math.max(1, Number(process.env.POOL_TARGET || 1));
-        const maxPerScan = Math.max(1, Number(process.env.POOL_MAX_GENERATIONS_PER_SCAN || 1));
-        let generatedThisScan = 0;
-        const list = pools();
-
-        console.log(
-            `[AUTO-POOL] Inventory scan: ${list.length} pools, target ${target}.`
-        );
-
-        for (const p of list) {
-            const count = readyCount(p);
-
-            if (count >= target) continue;
-
-            console.log(
-                `[AUTO-POOL] DEFICIT -> ${label(p)} | ${count}/${target}`
-            );
-
-            try {
-                // Only ONE paper per deficient pool per scan.
-                // This spreads quota instead of exhausting it on the first pool.
-                await generateAndSave(p);
-                generatedThisScan += 1;
-                await sleep(15000);
-                if (generatedThisScan >= maxPerScan) {
-                    console.log(`[AUTO-POOL] Scan generation cap reached (${maxPerScan}). Remaining pools will continue next scan.`);
-                    break;
-                }
-            } catch (err) {
-                if (isRateLimit(err)) {
-                    saveCooldown(err);
-                    return;
-                }
-
-                console.error(
-                    `[AUTO-POOL] Generation failed for ${label(p)}:`,
-                    err?.message || err
-                );
-
-                schedule(5 * 60 * 1000);
-                return;
-            }
-        }
-
-        console.log("[AUTO-POOL] Inventory scan complete.");
-        schedule(5 * 60 * 1000);
-    } finally {
-        running = false;
+      }
     }
+
+    // 2. Process priority pools (ensure 2 ready papers for top exams)
+    for (const p of PRIORITY_POOLS) {
+      const count = readyCount(p);
+      if (count < POOL_TARGET) {
+        console.log(`[AUTO-POOL] PRIORITY DEFICIT -> ${label(p)} | ${count}/${POOL_TARGET}`);
+        try {
+          await generateAndSave(p);
+          await sleep(4000);
+        } catch (err) {
+          if (isRateLimit(err)) {
+            saveCooldown(err);
+            return;
+          }
+          console.error(`[AUTO-POOL] Priority generation failed for ${label(p)}:`, err?.message || err);
+          schedule(60 * 1000);
+          return;
+        }
+      }
+    }
+
+    // 3. Process general pool list gradually (target: POOL_TARGET)
+    const list = pools();
+    for (const p of list) {
+      const count = readyCount(p);
+      if (count >= POOL_TARGET) continue;
+
+      try {
+        console.log(`[AUTO-POOL] GENERAL DEFICIT -> ${label(p)} | ${count}/${POOL_TARGET}`);
+        await generateAndSave(p);
+        await sleep(5000);
+      } catch (err) {
+        if (isRateLimit(err)) {
+          saveCooldown(err);
+          return;
+        }
+        console.error(`[AUTO-POOL] Generation failed for ${label(p)}:`, err?.message || err);
+        schedule(60 * 1000);
+        return;
+      }
+    }
+
+    console.log(`[AUTO-POOL] All active pools checked. Target of ${POOL_TARGET} ready papers satisfied.`);
+    schedule(3 * 60 * 1000); // Check again in 3 minutes
+  } finally {
+    running = false;
+  }
 }
 
 function start() {
-    console.log("[AUTO-POOL] Worker started.");
-    console.log(`[AUTO-POOL] Providers -> Gemini: ${process.env.GEMINI_API_KEY ? "ON" : "OFF"} | Groq: ${process.env.GROQ_API_KEY ? "ON" : "OFF"} | OpenAI fallback: ${process.env.OPENAI_API_KEY ? "ON" : "OFF"}`);
-    // Clear an old OpenAI-only cooldown from the previous provider architecture.
-    setState("pool_cooldown_until", "0");
-    schedule(3000);
+  console.log(`[AUTO-POOL] Auto-replenish pool worker started. Maintaining at least ${POOL_TARGET} ready papers per exam.`);
+  console.log(`[AUTO-POOL] Providers -> Gemini: ${process.env.GEMINI_API_KEY ? "ON" : "OFF"}`);
+  setState("pool_cooldown_until", "0");
+  schedule(2000);
 }
 
-module.exports = { start, scan, pools };
+module.exports = { start, scan, pools, requestReplenish, POOL_TARGET };

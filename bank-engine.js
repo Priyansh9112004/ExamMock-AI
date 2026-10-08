@@ -49,40 +49,10 @@ async function buildInstantPaper(userId, p) {
   const cfg = EXAMS[`${p.examId}|${p.stage}`];
   if (!cfg) throw userError('Unsupported exam/stage.');
 
-  // Direct 100% Fresh AI Generation via Gemini
-  if (p.mode === 'ai' || p.forceAi) {
-    try {
-      console.log(`[GEMINI-PIPELINE] Generating 100% fresh paper via Gemini AI for ${p.examId} | ${p.stage} (${p.language})...`);
-      const aiPaper = await generatePaper({
-        examId: p.examId,
-        stage: p.stage,
-        testType: p.testType,
-        section: p.testType === 'sectional' ? p.section : '',
-        language: p.language
-      });
-
-      db.importQuestions(aiPaper.questions.map(q => ({
-        examId: aiPaper.examId,
-        stage: aiPaper.stage,
-        sectionId: q.sectionId,
-        sectionName: q.section || q.sectionId,
-        language: aiPaper.language,
-        topic: q.topic || '',
-        subtopic: q.subtopic || '',
-        difficulty: 'MEDIUM',
-        question: q.question,
-        options: q.options,
-        answer: q.answer,
-        solution: q.solution || '',
-        shortTrick: q.shortTrick || '',
-        source: 'GEMINI_AI'
-      })));
-
-      db.savePaper(aiPaper);
-      return db.paperById(aiPaper.id);
-    } catch (err) {
-      console.warn(`[GEMINI-PIPELINE] Gemini live generation failed (${err.message}), gracefully serving from ready bank...`);
-    }
+  // 1. Instant check: If an unseen READY paper exists in the pool, serve it immediately (<5ms)!
+  const readyPaper = db.allocatePaper(userId, p);
+  if (readyPaper) {
+    return readyPaper;
   }
 
   let sections = cfg.sections;
@@ -92,85 +62,63 @@ async function buildInstantPaper(userId, p) {
   }
 
   const questions = [];
-  const shortages = [];
+  let bankHasAll = true;
 
   for (const sec of sections) {
     const lang = sec.englishOnly ? 'ENGLISH' : p.language;
-    let candidates = db.getBankCandidates(userId, { examId: p.examId, stage: p.stage, sectionId: sec.id, language: lang });
-    let picked = (p.mode === 'ai' || p.forceAi) ? null : choose(candidates, sec.count);
-
-    // If shortage or AI mode requested, auto-generate via Gemini pipeline
-    if (!picked || candidates.length < sec.count || p.mode === 'ai' || p.forceAi) {
-      let attempts = 0;
-      while (candidates.length < sec.count && attempts < 3) {
-        attempts++;
-        const chunkSize = Math.min(8, Math.max(3, sec.count - candidates.length));
-        console.log(`[GEMINI-PIPELINE] Generating ${chunkSize} questions for ${cfg.exam} | ${sec.name} (${lang}) via Gemini (round ${attempts})...`);
-        try {
-          const seen = new Set(candidates.map(c => normalizeQuestion(c.question)));
-          const generated = await generateSectionBatch({
-            cfg,
-            sec,
-            language: lang,
-            count: chunkSize,
-            seen
-          });
-
-          if (Array.isArray(generated) && generated.length > 0) {
-            db.importQuestions(generated.map(q => ({
-              examId: cfg.examId,
-              stage: cfg.stage,
-              sectionId: sec.id,
-              sectionName: sec.name,
-              language: lang,
-              topic: q.topic || '',
-              subtopic: q.subtopic || '',
-              difficulty: 'MEDIUM',
-              question: q.question,
-              options: q.options,
-              answer: q.answer,
-              solution: q.solution || '',
-              shortTrick: q.shortTrick || '',
-              source: 'GEMINI_AI'
-            })));
-
-            // Refresh candidates from DB
-            candidates = db.getBankCandidates(userId, { examId: p.examId, stage: p.stage, sectionId: sec.id, language: lang });
-          }
-        } catch (err) {
-          console.error(`[GEMINI-PIPELINE] Generation failed for ${sec.name}:`, err.message);
-          break;
-        }
-      }
-      picked = choose(candidates, sec.count);
-    }
-
+    const candidates = db.getBankCandidates(userId, { examId: p.examId, stage: p.stage, sectionId: sec.id, language: lang });
+    let picked = choose(candidates, sec.count);
     if (!picked) {
       if (candidates.length > 0) {
-        // Use all available questions if slightly short
         picked = candidates.slice(0, sec.count);
       } else {
-        shortages.push(`${sec.name}: need ${sec.count} ${lang} questions`);
-        continue;
+        bankHasAll = false;
+        break;
       }
     }
-
     questions.push(...picked.map(({ seen, ...q }) => ({ ...q, positive: cfg.positive, negative: cfg.negative })));
   }
 
-  if (shortages.length) {
-    const e = userError(`Question bank is not ready. ${shortages.join(' | ')}`, 503);
-    e.code = 'BANK_INSUFFICIENT';
-    throw e;
+  // 2. If question bank can satisfy all sections, serve instantly (<50ms)!
+  if (bankHasAll && questions.length > 0) {
+    const paper = {
+      id: crypto.randomUUID(), examId: p.examId, examName: cfg.exam, stage: p.stage,
+      testType: p.testType, section: p.testType === 'sectional' ? p.section : '',
+      language: p.language, questions
+    };
+    db.savePaper(paper);
+    return db.paperById(paper.id);
   }
 
-  const paper = {
-    id: crypto.randomUUID(), examId: p.examId, examName: cfg.exam, stage: p.stage,
-    testType: p.testType, section: p.testType === 'sectional' ? p.section : '',
-    language: p.language, questions
-  };
-  db.savePaper(paper);
-  return db.paperById(paper.id);
+  // 3. Fallback: Live generate via Gemini AI if neither pool nor bank has enough
+  console.log(`[GEMINI-PIPELINE] Pool & bank empty for ${p.examId} | ${p.stage}. Live generating via Gemini AI...`);
+  const aiPaper = await generatePaper({
+    examId: p.examId,
+    stage: p.stage,
+    testType: p.testType,
+    section: p.testType === 'sectional' ? p.section : '',
+    language: p.language
+  });
+
+  db.importQuestions(aiPaper.questions.map(q => ({
+    examId: aiPaper.examId,
+    stage: aiPaper.stage,
+    sectionId: q.sectionId,
+    sectionName: q.section || q.sectionId,
+    language: aiPaper.language,
+    topic: q.topic || '',
+    subtopic: q.subtopic || '',
+    difficulty: 'MEDIUM',
+    question: q.question,
+    options: q.options,
+    answer: q.answer,
+    solution: q.solution || '',
+    shortTrick: q.shortTrick || '',
+    source: 'GEMINI_AI'
+  })));
+
+  db.savePaper(aiPaper);
+  return db.paperById(aiPaper.id);
 }
 
 module.exports = { buildInstantPaper };
