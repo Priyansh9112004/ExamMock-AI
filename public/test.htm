@@ -14,7 +14,10 @@
       <b id="examTitle"></b>
       <div id="meta" class="cbtMeta"></div>
     </div>
-    <div id="timer" class="timer">00:00</div>
+    <div class="timerContainer">
+      <div id="timerLabel" class="timerLabel">TIME LEFT</div>
+      <div id="timer" class="timer">00:00</div>
+    </div>
   </header>
 
   <div id="sectionBar" class="sectionbar"></div>
@@ -52,11 +55,27 @@
       <div id="summaryCounts" class="summaryCounts"></div>
       <div id="palette" class="palette"></div>
 
+      <button id="sectionSubmitBtn" class="btn sectionSubmitBtn submitBtn" style="display:none;margin-top:16px;" onclick="promptSectionSubmit()">
+        Submit Section & Proceed
+      </button>
+
       <button id="submitBtn" class="btn primary submitBtn" onclick="submitTest()">
         Submit Test
       </button>
     </aside>
   </main>
+
+  <div id="sectionModal" class="modal hidden">
+    <div class="modalCard">
+      <h2 id="sectionModalTitle">Submit Section?</h2>
+      <p id="sectionModalDesc" class="muted">Are you sure you want to finish this section? Once submitted, you cannot edit or re-visit questions in this section.</p>
+      <div id="sectionSummary" class="submitSummary"></div>
+      <div class="modalActions">
+        <button class="btn" onclick="closeSectionModal()">Cancel</button>
+        <button class="btn primary" onclick="confirmSectionSubmit()">Proceed to Next Section</button>
+      </div>
+    </div>
+  </div>
 
   <div id="submitModal" class="modal hidden">
     <div class="modalCard">

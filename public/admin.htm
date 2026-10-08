@@ -1,0 +1,152 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Admin Panel | ExamMock AI</title>
+  <link rel="stylesheet" href="css/app.css">
+  <style>
+    .adminGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .kpiCard { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 18px 20px; box-shadow: 0 2px 6px rgba(0,0,0,0.03); }
+    .kpiCard span { font-size: 12px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+    .kpiCard b { display: block; font-size: 28px; font-weight: 900; color: #0f2744; margin-top: 6px; }
+    .kpiCard p { margin: 4px 0 0; font-size: 12px; color: #16a34a; font-weight: 600; }
+    
+    .adminTabs { display: flex; gap: 8px; border-bottom: 2px solid #e2e8f0; margin-bottom: 20px; }
+    .adminTabBtn { background: none; border: none; padding: 12px 18px; font-size: 15px; font-weight: 700; color: #64748b; cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -2px; transition: all 0.2s; }
+    .adminTabBtn.active { color: #2563eb; border-bottom-color: #2563eb; }
+    .adminTabBtn:hover:not(.active) { color: #0f2744; }
+
+    .searchBar { display: flex; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+    .searchInput { flex: 1; min-width: 260px; max-width: 420px; padding: 10px 14px; border: 1px solid #cbd5e1; border-radius: 10px; font-size: 14px; outline: none; }
+    .searchInput:focus { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.15); }
+
+    .adminTable { width: 100%; border-collapse: collapse; font-size: 14px; background: #fff; border-radius: 14px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.04); border: 1px solid #e2e8f0; }
+    .adminTable th { background: #f8fafc; padding: 14px 16px; text-align: left; font-size: 12px; font-weight: 800; color: #475569; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #e2e8f0; }
+    .adminTable td { padding: 14px 16px; border-bottom: 1px solid #f1f5f9; color: #1e293b; vertical-align: middle; }
+    .adminTable tr:hover td { background: #f8fafc; }
+
+    .statusBadge { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 800; }
+    .statusBadge.online { background: #dcfce7; color: #166534; }
+    .statusBadge.online::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #22c55e; }
+    .statusBadge.recent { background: #e0f2fe; color: #0369a1; }
+    .statusBadge.inactive { background: #f1f5f9; color: #64748b; }
+    .statusBadge.success { background: #dcfce7; color: #166534; }
+    .statusBadge.failed { background: #fee2e2; color: #991b1b; }
+    .statusBadge.admin { background: #fef3c7; color: #92400e; font-weight: 900; }
+    .statusBadge.user { background: #f1f5f9; color: #475569; }
+
+    .userAvatar { width: 34px; height: 34px; border-radius: 50%; background: #2563eb; color: #fff; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; font-size: 14px; }
+    .userInfo { display: flex; align-items: center; gap: 12px; }
+  </style>
+</head>
+<body>
+  <div id="appNav"></div>
+
+  <main class="container" style="padding-top: 30px; padding-bottom: 60px;">
+    <div class="pagehead" style="margin-bottom: 24px;">
+      <span class="eyebrow">ADMINISTRATOR CONTROL CENTRE</span>
+      <h1>Admin Dashboard & Login Monitor</h1>
+      <p class="muted">Live tracking of candidate accounts, real-time login audit stream, and examination activity.</p>
+    </div>
+
+    <!-- KPI Summary Row -->
+    <div class="adminGrid">
+      <div class="kpiCard">
+        <span>Registered Candidates</span>
+        <b id="kpiUsers">--</b>
+        <p>Total user accounts</p>
+      </div>
+      <div class="kpiCard">
+        <span>Active Today</span>
+        <b id="kpiActiveToday" style="color:#2563eb">--</b>
+        <p>Logged in today</p>
+      </div>
+      <div class="kpiCard">
+        <span>Mock Tests Taken</span>
+        <b id="kpiAttempts">--</b>
+        <p id="kpiCompletedAttempts">--</p>
+      </div>
+      <div class="kpiCard">
+        <span>Master Question Bank</span>
+        <b id="kpiQuestions">--</b>
+        <p>Ready across all exams</p>
+      </div>
+    </div>
+
+    <!-- Tab navigation -->
+    <div class="adminTabs">
+      <button class="adminTabBtn active" id="tabUsersBtn" onclick="switchTab('users')">👥 Candidates Roster & Activity (<span id="userCountBadge">0</span>)</button>
+      <button class="adminTabBtn" id="tabLoginsBtn" onclick="switchTab('logins')">📋 Real-Time Login Audit Log</button>
+      <button class="adminTabBtn" id="tabAttemptsBtn" onclick="switchTab('attempts')">📝 Mock Tests Activity</button>
+    </div>
+
+    <!-- Search & Filter Bar -->
+    <div class="searchBar">
+      <input type="text" id="searchInput" class="searchInput" placeholder="Search by name, user ID, or email..." oninput="filterData()">
+      <button class="btn" onclick="refreshAdminData()">🔄 Refresh Data</button>
+    </div>
+
+    <!-- Section 1: Users Roster -->
+    <div id="viewUsers" class="panel" style="padding:0;overflow-x:auto;">
+      <table class="adminTable">
+        <thead>
+          <tr>
+            <th>Candidate</th>
+            <th>Role</th>
+            <th>Status / Last Seen</th>
+            <th>Total Logins</th>
+            <th>Mocks Taken</th>
+            <th>Avg Accuracy</th>
+            <th>Registered Date</th>
+          </tr>
+        </thead>
+        <tbody id="usersTbody">
+          <tr><td colspan="7" style="text-align:center;padding:30px" class="muted">Loading candidate roster...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Section 2: Login Logs -->
+    <div id="viewLogins" class="panel hidden" style="padding:0;overflow-x:auto;">
+      <table class="adminTable">
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Candidate</th>
+            <th>Identifier Used</th>
+            <th>Status</th>
+            <th>IP Address</th>
+            <th>Browser / Device</th>
+          </tr>
+        </thead>
+        <tbody id="loginsTbody">
+          <tr><td colspan="6" style="text-align:center;padding:30px" class="muted">Loading login audit trail...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Section 3: Test Attempts -->
+    <div id="viewAttempts" class="panel hidden" style="padding:0;overflow-x:auto;">
+      <table class="adminTable">
+        <thead>
+          <tr>
+            <th>Started At</th>
+            <th>Candidate</th>
+            <th>Exam & Stage</th>
+            <th>Score</th>
+            <th>Accuracy</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="attemptsTbody">
+          <tr><td colspan="6" style="text-align:center;padding:30px" class="muted">Loading exam activity...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+
+  <script src="js/common.js"></script>
+  <script src="js/admin.js"></script>
+</body>
+</html>

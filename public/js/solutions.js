@@ -19,8 +19,8 @@ function renderAiCard(exp, state) {
   return `
     <div class="aiExplainCard">
       <div class="aiHeader">
-        <span class="aiBadge">✨ Gemini AI Diagnostic Breakdown</span>
-        <span class="muted" style="font-size:12px">Powered by Google Gemini</span>
+        <span class="aiBadge">✨ AI Diagnostic Breakdown</span>
+        <span class="muted" style="font-size:12px">AI In-Depth Diagnostic Analysis</span>
       </div>
       ${exp.mistakeAnalysis ? `
         <div class="aiSection mistake">
@@ -93,8 +93,8 @@ function render() {
 
     ${exp ? renderAiCard(exp, state) : `
       <div style="margin-top:16px">
-        <button class="btnAiAction" id="aiBtn_${idx}" onclick="askGemini(${idx})">
-          ✨ Ask Gemini AI: In-Depth Breakdown ${state === 'wrong' ? '(Why was my choice wrong?)' : '(Deep Conceptual Diagnosis)'}
+        <button class="btnAiAction" id="aiBtn_${idx}" onclick="askAI(${idx})">
+          ✨ Ask AI: In-Depth Breakdown ${state === 'wrong' ? '(Why was my choice wrong?)' : '(Deep Conceptual Diagnosis)'}
         </button>
       </div>
     `}
@@ -108,11 +108,11 @@ function render() {
   nextSolution.disabled = idx === answers.length - 1;
 }
 
-async function askGemini(i) {
+async function askAI(i) {
   const btn = document.getElementById(`aiBtn_${i}`);
   if (btn) {
     btn.disabled = true;
-    btn.innerHTML = `🤖 Gemini AI is diagnosing question and conceptual traps...`;
+    btn.innerHTML = `🤖 AI is diagnosing question and conceptual traps...`;
   }
 
   const x = answers[i] || {};

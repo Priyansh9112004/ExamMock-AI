@@ -332,9 +332,9 @@
       }
     }
 
-    // If no real pending attempts were found, populate from mock-data
-    if (!state.activePendingList || state.activePendingList.length === 0) {
-      state.activePendingList = [...(EXAMMOCK_DATA.pendingExams || [])];
+    // If no real pending attempts were found, keep list empty
+    if (!state.activePendingList) {
+      state.activePendingList = [];
     }
 
     // Render Cards & Sections
@@ -706,8 +706,13 @@
             userScore: Math.round(Number(match.accuracy || 0))
           };
         }
-        return group;
+        return {
+          ...group,
+          userScore: 0
+        };
       });
+    } else {
+      data = data.map(group => ({ ...group, userScore: 0 }));
     }
 
     // SVG Chart Geometry

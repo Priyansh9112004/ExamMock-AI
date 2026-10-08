@@ -1,7 +1,16 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
-const { createUser, getUserByIdentifier, getUserById } = require('./database');
+const { 
+  createUser, 
+  getUserByIdentifier, 
+  getUserById,
+  recordLogin,
+  getAdminOverview,
+  getAdminUsers,
+  getAdminLoginLogs,
+  getAdminAttempts
+} = require('./database');
 const { userError } = require('./errors');
 
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -13,12 +22,12 @@ const DUMMY_HASH = bcrypt.hashSync('timing-equalizer', 12);
 const limiter = (limit, windowMs, error, extra = {}) =>
   rateLimit({ windowMs, limit, standardHeaders: true, legacyHeaders: false, message: { ok: false, error }, ...extra });
 
-const loginLimiter = limiter(10, 15 * 60 * 1000, 'Too many failed logins. Try again in 15 minutes.', { skipSuccessfulRequests: true });
-const registerLimiter = limiter(5, 60 * 60 * 1000, 'Too many sign-ups from this network. Try again later.');
+const loginLimiter = limiter(20, 15 * 60 * 1000, 'Too many failed logins. Try again in 15 minutes.', { skipSuccessfulRequests: true });
+const registerLimiter = limiter(10, 60 * 60 * 1000, 'Too many sign-ups from this network. Try again later.');
 
 function token(user) {
   return jwt.sign(
-    { sub: user.id, name: user.name, userId: user.user_id, email: user.email },
+    { sub: user.id, name: user.name, userId: user.user_id || user.userId, email: user.email, role: user.role || 'user' },
     JWT_SECRET, { algorithm: 'HS256', expiresIn: '7d' }
   );
 }
@@ -35,8 +44,24 @@ function requireAuth(req, res, next) {
   }
 }
 
+function requireAdmin(req, res, next) {
+  requireAuth(req, res, async () => {
+    if (req.auth && req.auth.role === 'admin') {
+      return next();
+    }
+    try {
+      const u = await getUserById(req.auth.sub);
+      if (u && u.role === 'admin') {
+        req.auth.role = 'admin';
+        return next();
+      }
+    } catch {}
+    return res.status(403).json({ ok: false, error: 'Admin access required. You do not have permission to view this panel.' });
+  });
+}
+
 const validEmail = v => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim()) && String(v).length <= 254;
-const validUserId = v => /^[A-Za-z0-9_]{3,25}$/.test(String(v || '').trim());
+const validUserId = v => /^[A-Za-z0-9_@.-]{3,35}$/.test(String(v || '').trim());
 
 function sendAuthError(res, e) {
   if (e.expose) return res.status(e.status || 400).json({ ok: false, error: e.message });
@@ -49,6 +74,8 @@ function sendAuthError(res, e) {
 
 function routes(app) {
   app.post('/api/auth/register', registerLimiter, async (req, res) => {
+    const ip = (req.headers['x-forwarded-for']?.split(',')[0] || req.socket?.remoteAddress || req.ip || '').slice(0, 60);
+    const ua = (req.headers['user-agent'] || '').slice(0, 250);
     try {
       const name = String(req.body.name || '').trim();
       const userId = String(req.body.userId || '').trim();
@@ -66,17 +93,30 @@ function routes(app) {
 
       const passwordHash = await bcrypt.hash(password, 12);
       const user = await createUser({ name, userId, email, passwordHash });
+      if (recordLogin) {
+        await recordLogin({ userId: user.id, identifier: user.user_id, userName: user.name, status: 'SUCCESS', ip, userAgent: ua });
+      }
       res.json({ ok: true, token: token(user), user });
     } catch (e) { sendAuthError(res, e); }
   });
 
   app.post('/api/auth/login', loginLimiter, async (req, res) => {
+    const identifier = String(req.body.identifier || '').trim().slice(0, 254);
+    const ip = (req.headers['x-forwarded-for']?.split(',')[0] || req.socket?.remoteAddress || req.ip || '').slice(0, 60);
+    const ua = (req.headers['user-agent'] || '').slice(0, 250);
     try {
-      const identifier = String(req.body.identifier || '').trim().slice(0, 254);
       const u = identifier ? await getUserByIdentifier(identifier) : null;
       const ok = await bcrypt.compare(String(req.body.password || ''), u ? u.password_hash : DUMMY_HASH);
-      if (!u || !ok) throw userError('Invalid User ID/email or password', 401);
+      if (!u || !ok) {
+        if (recordLogin) {
+          await recordLogin({ userId: u?.id || null, identifier, userName: u?.name || null, status: 'FAILED', ip, userAgent: ua });
+        }
+        throw userError('Invalid User ID/email or password', 401);
+      }
       const user = await getUserById(u.id);
+      if (recordLogin) {
+        await recordLogin({ userId: user.id, identifier, userName: user.name, status: 'SUCCESS', ip, userAgent: ua });
+      }
       res.json({ ok: true, token: token(user), user });
     } catch (e) { sendAuthError(res, e); }
   });
@@ -86,6 +126,35 @@ function routes(app) {
     if (!user) return res.status(401).json({ ok: false, error: 'Account not found' });
     res.json({ ok: true, user });
   });
+
+  // Admin APIs
+  app.get('/api/admin/overview', requireAdmin, async (req, res) => {
+    try {
+      const overview = await getAdminOverview();
+      res.json({ ok: true, overview });
+    } catch (e) { sendAuthError(res, e); }
+  });
+
+  app.get('/api/admin/users', requireAdmin, async (req, res) => {
+    try {
+      const users = await getAdminUsers();
+      res.json({ ok: true, users });
+    } catch (e) { sendAuthError(res, e); }
+  });
+
+  app.get('/api/admin/login-logs', requireAdmin, async (req, res) => {
+    try {
+      const logs = await getAdminLoginLogs(req.query.limit);
+      res.json({ ok: true, logs });
+    } catch (e) { sendAuthError(res, e); }
+  });
+
+  app.get('/api/admin/attempts', requireAdmin, async (req, res) => {
+    try {
+      const attempts = await getAdminAttempts(req.query.limit);
+      res.json({ ok: true, attempts });
+    } catch (e) { sendAuthError(res, e); }
+  });
 }
 
-module.exports = { routes, requireAuth };
+module.exports = { routes, requireAuth, requireAdmin };

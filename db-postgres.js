@@ -30,7 +30,7 @@ async function createUser({ name, userId, email, passwordHash }) {
 async function getUserByIdentifier(identifier) {
   const v = String(identifier || '').trim();
   const res = await pool.query(
-    `SELECT * FROM users WHERE LOWER(user_id) = LOWER($1) OR LOWER(email) = LOWER($2) LIMIT 1`,
+    `SELECT id, name, user_id, email, password_hash, COALESCE(role, 'user') AS role, last_login_at, login_count FROM users WHERE LOWER(user_id) = LOWER($1) OR LOWER(email) = LOWER($2) LIMIT 1`,
     [v, v]
   );
   return res.rows[0] || null;
@@ -38,7 +38,7 @@ async function getUserByIdentifier(identifier) {
 
 async function getUserById(uid) {
   const res = await pool.query(
-    `SELECT id, name, user_id AS "userId", user_id, email, created_at AS "createdAt" FROM users WHERE id = $1 LIMIT 1`,
+    `SELECT id, name, user_id AS "userId", user_id, email, COALESCE(role, 'user') AS role, created_at AS "createdAt", last_login_at AS "lastLoginAt", login_count AS "loginCount" FROM users WHERE id = $1 LIMIT 1`,
     [uid]
   );
   return res.rows[0] || null;
@@ -72,11 +72,26 @@ async function allocatePaper(userId, p) {
      ORDER BY p.created_at ASC LIMIT 1`,
     [p.examId, p.stage, p.testType, p.section || '', p.language, userId]
   );
-  if (!res.rows[0]) return null;
-  const row = res.rows[0];
+  if (res.rows[0]) {
+    const row = res.rows[0];
+    return {
+      ...row,
+      questions_json: typeof row.questions_json === 'string' ? row.questions_json : JSON.stringify(row.questions_json)
+    };
+  }
+
+  // Fallback: If user has attempted all ready papers in this pool, re-serve any available ready paper (<5ms)
+  const fallbackRes = await pool.query(
+    `SELECT p.* FROM papers p
+     WHERE p.exam_id = $1 AND p.stage = $2 AND p.test_type = $3 AND p.section = $4 AND p.language = $5 AND p.status = 'READY'
+     ORDER BY p.created_at DESC LIMIT 1`,
+    [p.examId, p.stage, p.testType, p.section || '', p.language]
+  );
+  if (!fallbackRes.rows[0]) return null;
+  const fRow = fallbackRes.rows[0];
   return {
-    ...row,
-    questions_json: typeof row.questions_json === 'string' ? row.questions_json : JSON.stringify(row.questions_json)
+    ...fRow,
+    questions_json: typeof fRow.questions_json === 'string' ? fRow.questions_json : JSON.stringify(fRow.questions_json)
   };
 }
 
@@ -95,26 +110,33 @@ async function startAttempt(userId, paperId) {
     `INSERT INTO attempts (user_id, paper_id, status) VALUES ($1, $2, 'IN_PROGRESS') RETURNING id`,
     [userId, paperId]
   );
-  const attemptId = res.rows[0].id;
+  const attemptId = Number(res.rows[0].id);
 
-  // Track seen questions asynchronously
-  const pRow = await pool.query(`SELECT questions_json FROM papers WHERE id = $1`, [paperId]);
-  if (pRow.rows[0]) {
-    let qs = pRow.rows[0].questions_json;
-    if (typeof qs === 'string') { try { qs = JSON.parse(qs); } catch {} }
-    if (Array.isArray(qs)) {
-      for (const q of qs) {
-        if (q.id) {
-          await pool.query(
-            `INSERT INTO user_seen_questions (user_id, question_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-            [userId, String(q.id)]
-          ).catch(() => {});
+  // Track seen questions asynchronously in background - NEVER block the user!
+  setImmediate(async () => {
+    try {
+      const pRow = await pool.query(`SELECT questions_json FROM papers WHERE id = $1`, [paperId]);
+      if (pRow.rows[0]) {
+        let qs = pRow.rows[0].questions_json;
+        if (typeof qs === 'string') { try { qs = JSON.parse(qs); } catch {} }
+        if (Array.isArray(qs)) {
+          const qIds = qs.map(q => q && q.id ? String(q.id) : null).filter(Boolean);
+          if (qIds.length > 0) {
+            await pool.query(
+              `INSERT INTO user_seen_questions (user_id, question_id)
+               SELECT $1, unnest($2::text[])
+               ON CONFLICT DO NOTHING`,
+              [userId, qIds]
+            );
+          }
         }
       }
+    } catch (e) {
+      // background warning ignored
     }
-  }
+  });
 
-  return Number(attemptId);
+  return attemptId;
 }
 
 // REAL-TIME AUTO-SAVE FOR UNSOLVED / IN-PROGRESS PAPERS
@@ -361,7 +383,7 @@ async function getBankCandidates(userId, { examId, stage, sectionId, language })
   else if (SSC_EXAMS.has(examId)) examList = [...SSC_EXAMS, ''];
   else if (RAILWAY_EXAMS.has(examId)) examList = [...RAILWAY_EXAMS, ''];
 
-  const res = await pool.query(
+  let res = await pool.query(
     `SELECT qb.*, (usq.question_id IS NOT NULL) AS seen
      FROM question_bank qb
      LEFT JOIN user_seen_questions usq ON usq.user_id = $1 AND usq.question_id = qb.id
@@ -371,6 +393,17 @@ async function getBankCandidates(userId, { examId, stage, sectionId, language })
     [userId, secList, lang, examList]
   );
 
+  // Instant fallback: If not enough questions in this exact language/exam, borrow from master section questions so user NEVER waits
+  if (!res.rows.length) {
+    res = await pool.query(
+      `SELECT qb.*, false AS seen
+       FROM question_bank qb
+       WHERE qb.active = 1 AND qb.section_id = ANY($1::text[])
+       ORDER BY RANDOM() LIMIT 100`,
+      [secList]
+    );
+  }
+
   return res.rows.map(r => ({
     id: r.id, sectionId: r.section_id, section: r.section_name, topic: r.topic, subtopic: r.subtopic,
     difficulty: String(r.difficulty || 'MEDIUM').toUpperCase(), question: r.question,
@@ -379,6 +412,124 @@ async function getBankCandidates(userId, { examId, stage, sectionId, language })
     groupId: r.group_id || '', groupType: r.group_type || '', sharedStem: r.shared_stem || '',
     groupOrder: Number(r.group_order || 0), seen: !!r.seen
   }));
+}
+
+async function recordLogin({ userId, identifier, userName, status, ip, userAgent }) {
+  try {
+    await pool.query(
+      `INSERT INTO login_logs (user_id, identifier, user_name, status, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [userId || null, identifier || '', userName || null, status, ip || '', userAgent || '']
+    );
+    if (status === 'SUCCESS' && userId) {
+      await pool.query(
+        `UPDATE users
+         SET last_login_at = CURRENT_TIMESTAMP,
+             login_count = COALESCE(login_count, 0) + 1,
+             last_ip = $2
+         WHERE id = $1`,
+        [userId, ip || '']
+      );
+    }
+  } catch (err) {
+    console.warn('[DB] recordLogin warning:', err.message);
+  }
+}
+
+async function getAdminOverview() {
+  const [uRes, aRes, pRes, qRes, lTodayRes] = await Promise.all([
+    pool.query(`SELECT COUNT(*) total_users FROM users`),
+    pool.query(`SELECT COUNT(*) total_attempts, COUNT(submitted_at) submitted_attempts FROM attempts`),
+    pool.query(`SELECT COUNT(*) total_papers FROM papers`),
+    pool.query(`SELECT COUNT(*) total_questions FROM question_bank`),
+    pool.query(`SELECT COUNT(DISTINCT user_id) active_today FROM login_logs WHERE created_at >= CURRENT_DATE AND status = 'SUCCESS'`)
+  ]);
+
+  return {
+    totalUsers: Number(uRes.rows[0]?.total_users || 0),
+    activeToday: Number(lTodayRes.rows[0]?.active_today || 0),
+    totalAttempts: Number(aRes.rows[0]?.total_attempts || 0),
+    submittedAttempts: Number(aRes.rows[0]?.submitted_attempts || 0),
+    totalPapers: Number(pRes.rows[0]?.total_papers || 0),
+    totalQuestions: Number(qRes.rows[0]?.total_questions || 0)
+  };
+}
+
+async function getAdminUsers() {
+  const res = await pool.query(`
+    SELECT 
+      u.id,
+      u.name,
+      u.user_id AS "userId",
+      u.email,
+      COALESCE(u.role, 'user') AS role,
+      u.created_at AS "createdAt",
+      u.last_login_at AS "lastLoginAt",
+      u.last_ip AS "lastIp",
+      COALESCE(u.login_count, 0) AS "loginCount",
+      COUNT(a.id) AS "testsAttempted",
+      COUNT(a.submitted_at) AS "testsCompleted",
+      AVG(a.accuracy) AS "avgAccuracy",
+      MAX(a.started_at) AS "lastTestAt"
+    FROM users u
+    LEFT JOIN attempts a ON a.user_id = u.id
+    GROUP BY u.id, u.name, u.user_id, u.email, u.role, u.created_at, u.last_login_at, u.last_ip, u.login_count
+    ORDER BY u.last_login_at DESC NULLS LAST, u.created_at DESC
+  `);
+  return res.rows.map(r => ({
+    ...r,
+    testsAttempted: Number(r.testsAttempted || 0),
+    testsCompleted: Number(r.testsCompleted || 0),
+    avgAccuracy: r.avgAccuracy != null ? Number(Number(r.avgAccuracy).toFixed(1)) : null,
+    isOnline: r.lastLoginAt ? (Date.now() - new Date(r.lastLoginAt).getTime() < 15 * 60 * 1000) : false
+  }));
+}
+
+async function getAdminLoginLogs(limit = 100) {
+  const res = await pool.query(
+    `SELECT 
+       l.id,
+       l.user_id AS "userId",
+       l.identifier,
+       COALESCE(l.user_name, u.name, 'Unknown') AS "userName",
+       l.status,
+       l.ip_address AS "ipAddress",
+       l.user_agent AS "userAgent",
+       l.created_at AS "createdAt"
+     FROM login_logs l
+     LEFT JOIN users u ON u.id = l.user_id
+     ORDER BY l.created_at DESC
+     LIMIT $1`,
+    [Math.min(500, Number(limit) || 100)]
+  );
+  return res.rows;
+}
+
+async function getAdminAttempts(limit = 50) {
+  const res = await pool.query(
+    `SELECT 
+       a.id,
+       a.user_id AS "userId",
+       u.name AS "userName",
+       u.user_id AS "userHandle",
+       p.exam_name AS "examName",
+       p.stage,
+       p.test_type AS "testType",
+       p.section,
+       a.score,
+       a.max_score AS "maxScore",
+       a.accuracy,
+       a.started_at AS "startedAt",
+       a.submitted_at AS "submittedAt",
+       a.status
+     FROM attempts a
+     JOIN users u ON u.id = a.user_id
+     JOIN papers p ON p.id = a.paper_id
+     ORDER BY a.started_at DESC
+     LIMIT $1`,
+    [Math.min(200, Number(limit) || 50)]
+  );
+  return res.rows;
 }
 
 module.exports = {
@@ -403,5 +554,10 @@ module.exports = {
   setState,
   importQuestions,
   bankCounts,
-  getBankCandidates
+  getBankCandidates,
+  recordLogin,
+  getAdminOverview,
+  getAdminUsers,
+  getAdminLoginLogs,
+  getAdminAttempts
 };

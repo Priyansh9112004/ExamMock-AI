@@ -46,6 +46,22 @@ function cleanPaper(row, attemptId) {
   }
   if (!Array.isArray(questions)) questions = [];
 
+  // If exam has strict sectional timing, sort questions strictly according to exam section order
+  if (cfg && cfg.sections && row.test_type !== 'sectional') {
+    const secOrder = new Map(cfg.sections.map((s, idx) => [String(s.id).toLowerCase(), idx]));
+    const secNameOrder = new Map(cfg.sections.map((s, idx) => [String(s.name).toLowerCase(), idx]));
+    questions.sort((a, b) => {
+      const aKey = String(a.sectionId || a.section || '').toLowerCase();
+      const bKey = String(b.sectionId || b.section || '').toLowerCase();
+      const aIdx = secOrder.get(aKey) ?? secNameOrder.get(aKey) ?? 999;
+      const bIdx = secOrder.get(bKey) ?? secNameOrder.get(bKey) ?? 999;
+      return aIdx - bIdx;
+    });
+  }
+
+  const isSectional = row.test_type === 'sectional';
+  const hasSectionalTiming = !!cfg?.hasSectionalTiming && !isSectional;
+
   return {
     attemptId: attemptId || row.attempt_id || row.id,
     paperId: row.paper_id || row.paperId || row.id,
@@ -55,6 +71,13 @@ function cleanPaper(row, attemptId) {
     testType: row.test_type,
     section: row.section,
     language: row.language,
+    hasSectionalTiming,
+    sections: (cfg?.sections || []).map(s => ({
+      id: s.id,
+      name: s.name,
+      count: s.count,
+      duration: s.duration || (hasSectionalTiming ? Math.round((cfg.duration || 3600) / (cfg.sections.length || 1)) : 0)
+    })),
     duration: paperDuration(cfg, row.test_type, questions.length),
     questions: questions.map(publicQuestion)
   };

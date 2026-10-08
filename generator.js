@@ -133,9 +133,18 @@ function cleanJson(text) {
   try {
     return JSON.parse(str);
   } catch (err) {
-    // Remove trailing commas before closing braces/brackets
-    const sanitized = str.replace(/,\s*([\]}])/g, '$1');
-    return JSON.parse(sanitized);
+    try {
+      // Remove trailing commas before closing braces/brackets
+      const sanitized = str.replace(/,\s*([\]}])/g, '$1');
+      return JSON.parse(sanitized);
+    } catch {
+      // Replace unescaped raw newlines/tabs inside JSON strings
+      const cleaned = str
+        .replace(/(?<!\\)\r\n/g, "\\n")
+        .replace(/(?<!\\)\n/g, "\\n")
+        .replace(/(?<!\\)\t/g, "\\t");
+      return JSON.parse(cleaned);
+    }
   }
 }
 
@@ -349,8 +358,22 @@ Provide an exhaustive, high-yield diagnostic explanation in clean JSON format:
 Return ONLY valid JSON, no markdown.
 `.trim();
 
-  const ai = await generateText(prompt, { temperature: 0.2 });
-  return cleanJson(ai.text);
+  try {
+    const ai = await generateText(prompt, { temperature: 0.2 });
+    return cleanJson(ai.text);
+  } catch (err) {
+    console.warn('[AI-EXPLAIN] API error, using instant fallback breakdown:', err.message);
+    const correctLetter = String.fromCharCode(65 + correctIndex);
+    const chosenLetter = chosenIndex !== null ? String.fromCharCode(65 + chosenIndex) : null;
+    return {
+      mistakeAnalysis: chosenLetter 
+        ? `Option (${chosenLetter}) is incorrect. In competitive exams, this is a common distractor designed to catch calculation slips or incorrect rule application. Verify the exact condition given in the problem statement.`
+        : `This question was left unattempted. Candidates often struggle with time management on questions of this pattern. Recognizing the question type in the first 5 seconds allows confident attempts.`,
+      coreConcept: `This problem evaluates foundational concepts of ${topic || section || 'competitive examination syllabus'}. Focus on identifying given variables and applying direct formulas.`,
+      stepByStep: `1. Re-read the question carefully to identify given values and target variable.\n2. Apply the standard formula / deductive logic for ${topic || 'this question'}.\n3. Verify that Option (${correctLetter}): "${options[correctIndex] || ''}" satisfies all problem constraints.`,
+      shortcut: `Option Elimination Shortcut: In multiple-choice questions of this pattern, test the extreme options or check unit digits / parity to eliminate at least 2 options in under 15 seconds.`
+    };
+  }
 }
 
 module.exports = { generatePaper, generateSectionBatch, normalizeQuestion, explainQuestionWithAI, generateText };
