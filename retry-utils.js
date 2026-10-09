@@ -29,4 +29,10 @@ function isRateLimit(err) {
     || /rate limit|too many requests|resource_exhausted|quota/i.test(String(err?.message || ''));
 }
 
-module.exports = { parseRetryMs, isRateLimit };
+function isTransient(err) {
+  const s = Number(err?.status || err?.code);
+  return [500, 502, 503, 504].includes(s)
+    || /service unavailable|overloaded|internal server error|bad gateway|status code 50/i.test(String(err?.message || ''));
+}
+
+module.exports = { parseRetryMs, isRateLimit, isTransient };

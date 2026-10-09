@@ -68,14 +68,26 @@ async function buildInstantPaper(userId, p) {
     const lang = sec.englishOnly ? 'ENGLISH' : p.language;
     const candidates = await db.getBankCandidates(userId, { examId: p.examId, stage: p.stage, sectionId: sec.id, language: lang });
     let picked = choose(candidates, sec.count);
-    if (!picked) {
-      if (candidates.length > 0) {
-        picked = candidates.slice(0, sec.count);
-      } else {
+    if (!picked || picked.length < sec.count) {
+      bankHasAll = false;
+      break;
+    }
+
+    // Check topic diversity: ensure bank has varied topics and not repetitive patterns
+    if (sec.count >= 15) {
+      const topicCounts = new Map();
+      for (const q of picked) {
+        const t = (q.topic || 'general').toLowerCase().trim();
+        topicCounts.set(t, (topicCounts.get(t) || 0) + 1);
+      }
+      const maxSingleTopic = Math.max(...topicCounts.values(), 0);
+      if (maxSingleTopic > Math.ceil(sec.count * 0.35) || topicCounts.size < 3) {
+        console.log(`[BANK-ENGINE] Section ${sec.name} lacks topic diversity in bank (${topicCounts.size} distinct topics, highest: ${maxSingleTopic}/${sec.count}). Live generating via Gemini AI...`);
         bankHasAll = false;
         break;
       }
     }
+
     questions.push(...picked.map(({ seen, ...q }) => ({ ...q, positive: cfg.positive, negative: cfg.negative })));
   }
 

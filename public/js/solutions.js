@@ -46,6 +46,15 @@ function renderAiCard(exp, state) {
   `;
 }
 
+function formatQuestionText(text) {
+  if (!text) return "";
+  let safe = esc(text);
+  safe = safe.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  safe = safe.replace(/__([^_]+)__/g, '<u>$1</u>');
+  safe = safe.replace(/\n/g, '<br>');
+  return safe;
+}
+
 function render() {
   if (!answers.length) {
     solutionCard.innerHTML = '<p class="muted">Detailed answer data is not available for this attempt.</p>';
@@ -63,13 +72,26 @@ function render() {
 
   const exp = x.aiExplanation;
 
+  let mainText = x.question || q.question || "";
+  let dir = x.direction || q.direction || "";
+  if (!dir) {
+    const match = mainText.match(/^(Directions?\s*:[^\n]+(?:\n[^\n]+)?)\n\s*\n?([\s\S]+)$/i);
+    if (match && match[1].length < 350) {
+      dir = match[1].trim();
+      mainText = match[2].trim();
+    }
+  }
+  const shared = x.sharedStem || q.sharedStem || "";
+
   solutionCard.innerHTML = `
     <div class="solutionTop">
       <b>Question ${idx + 1} of ${answers.length}</b>
       <span class="badge ${state}">${label}</span>
     </div>
     ${x.section ? `<div class="muted" style="margin-top:8px">${esc(x.section)}${x.topic ? ` • ${esc(x.topic)}` : ""}</div>` : ""}
-    <div class="solQuestion">${esc(x.question || q.question || "")}</div>
+    ${dir ? `<div class="questionDirection" style="margin:12px 0;padding:12px 14px;background:#f0f7ff;border-left:4px solid #2563eb;border-radius:8px;font-size:13px;color:#1e3a8a;line-height:1.5;"><b>📌 Instructions / Directions:</b><br>${esc(dir)}</div>` : ""}
+    ${shared ? `<div class="sharedStem" style="margin:12px 0;padding:14px;background:#f8fafc;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;white-space:pre-wrap;line-height:1.6;"><b>📊 Reference Passage / Data:</b><br>${esc(shared)}</div>` : ""}
+    <div class="solQuestion">${formatQuestionText(mainText)}</div>
     ${opts.map((o, n) => {
       let c = "";
       if (n === correct && n === selected) c = "selectedCorrect";

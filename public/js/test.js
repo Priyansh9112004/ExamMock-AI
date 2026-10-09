@@ -240,6 +240,15 @@ function alertLockedSection(n) {
     }
 }
 
+function formatQuestionText(text) {
+    if (!text) return "";
+    let safe = esc(text);
+    safe = safe.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+    safe = safe.replace(/__([^_]+)__/g, '<u>$1</u>');
+    safe = safe.replace(/\n/g, '<br>');
+    return safe;
+}
+
 function render() {
     visited[i] = true;
 
@@ -252,17 +261,33 @@ function render() {
     marks.textContent = `+${pos} / -${Number(neg).toFixed(2)}`;
 
     const shared = q.sharedStem || "";
-    const dir = q.direction || "";
+    let mainText = q.question || "";
+    let dir = q.direction || "";
+
+    if (!dir) {
+        const match = mainText.match(/^(Directions?\s*:[^\n]+(?:\n[^\n]+)?)\n\s*\n?([\s\S]+)$/i);
+        if (match && match[1].length < 350) {
+            dir = match[1].trim();
+            mainText = match[2].trim();
+        }
+    }
+
     direction.innerHTML = "";
     if (dir) {
-        const d = document.createElement("div"); d.className = "questionDirection"; d.textContent = dir; direction.appendChild(d);
+        const d = document.createElement("div");
+        d.className = "questionDirection";
+        d.innerHTML = `<b>📌 Instructions / Directions:</b><br>${esc(dir)}`;
+        direction.appendChild(d);
     }
     if (shared) {
-        const s = document.createElement("div"); s.className = "sharedStem"; s.textContent = shared; direction.appendChild(s);
+        const s = document.createElement("div");
+        s.className = "sharedStem";
+        s.innerHTML = `<b>📊 Reference Passage / Data:</b><br><div style="margin-top:6px;white-space:pre-wrap;">${esc(shared)}</div>`;
+        direction.appendChild(s);
     }
     direction.style.display = (dir || shared) ? "block" : "none";
 
-    question.textContent = q.question;
+    question.innerHTML = formatQuestionText(mainText);
 
     options.innerHTML = (q.options || []).map((option, n) => {
         const isChecked = answers[i] !== undefined && answers[i] !== null && String(answers[i]) === String(n);
